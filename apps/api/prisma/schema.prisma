@@ -1,0 +1,169 @@
+// Argo control-plane relational store. Postgres holds users, sessions,
+// operation metadata, billing, and template counters. MongoDB holds
+// generated code bundles, agent invocations (with full envelopes), runtime
+// events, and operation_repairs (compliance artifact).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = []
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id              String       @id @default(cuid())
+  email           String       @unique
+  name            String?
+  timezone        String       @default("America/New_York")
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  lastLoginAt     DateTime?
+  archived        Boolean      @default(false)
+
+  sessions        Session[]
+  magicLinks      MagicLink[]
+  operations      Operation[]
+
+  @@map("users")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash    String   @unique
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+  lastSeenAt   DateTime @default(now())
+  ipAddress    String?
+  userAgent    String?
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model MagicLink {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  consumedAt DateTime?
+
+  @@index([expiresAt])
+  @@map("magic_links")
+}
+
+enum OperationStatus {
+  draft
+  mapping
+  awaiting_user_confirmation
+  building
+  testing
+  deploying
+  running
+  paused
+  failed_build
+  archived
+}
+
+model Operation {
+  id           String          @id @default(cuid())
+  ownerId      String
+  owner        User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  slug         String          @unique
+  name         String
+  status       OperationStatus @default(draft)
+  publicUrl    String?
+  timezone     String          @default("America/New_York")
+
+  // Snapshot of the latest WorkflowMap version (the canonical map lives in Mongo).
+  workflowMapVersion Int       @default(0)
+  bundleVersion      Int       @default(0)
+
+  // Trust counters (per-operation aggregate; per-template lives in Mongo).
+  totalApprovalsRequested Int  @default(0)
+  totalApprovalsGranted   Int  @default(0)
+
+  pendingApprovals    Int      @default(0)
+  submissionsToday    Int      @default(0)
+  lastEventAt         DateTime?
+
+  // Live deployment handle (mirrored from workspace-runtime).
+  deploymentProvider   String? // 'blaxel' | 'docker_mock'
+  deploymentSandboxId  String?
+  deploymentRegion     String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  approvals   Approval[]
+  templates   TemplateCounter[]
+
+  @@index([ownerId, status])
+  @@map("operations")
+}
+
+enum ApprovalStatus {
+  pending
+  approved
+  declined
+  expired
+  editing
+}
+
+model Approval {
+  id            String         @id @default(cuid())
+  operationId   String
+  operation     Operation      @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  templateId    String?
+  // sha256 hex of the plaintext token (we never store the plaintext)
+  tokenHash     String         @unique
+  status        ApprovalStatus @default(pending)
+
+  subjectLine   String
+  recipientEmail String
+  draftPreview  String
+
+  createdAt     DateTime       @default(now())
+  remindAt      DateTime
+  expiresAt     DateTime
+  reminderSentAt DateTime?
+  decidedAt     DateTime?
+  emailSentAt   DateTime?
+
+  @@index([operationId, status])
+  @@index([expiresAt])
+  @@map("approvals")
+}
+
+model TemplateCounter {
+  id              String   @id @default(cuid())
+  operationId     String
+  operation       Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  templateMongoId String   @unique
+  kind            String
+  sendsToDate     Int      @default(0)
+  approvalsToDate Int      @default(0)
+
+  @@index([operationId, kind])
+  @@map("template_counters")
+}
+
+model BillingCustomer {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  email             String   @unique
+  stripeCustomerId  String?  @unique
+  trialOperationId  String?
+  trialStartedAt    DateTime?
+  createdAt         DateTime @default(now())
+
+  @@map("billing_customers")
+}

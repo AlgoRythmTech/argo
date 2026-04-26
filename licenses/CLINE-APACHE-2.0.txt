@@ -1,0 +1,7 @@
+Cline — https://github.com/cline/cline
+Apache License, Version 2.0
+
+Argo's repair-approval UX patterns (diff-then-approve) borrow conceptually
+from Cline. No code is lifted; only patterns. Listed for thoroughness.
+
+Full Apache 2.0 license: http://www.apache.org/licenses/LICENSE-2.0

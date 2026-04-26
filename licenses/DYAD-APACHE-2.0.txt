@@ -1,0 +1,10 @@
+Dyad — https://github.com/dyad-sh/dyad
+Apache License, Version 2.0
+
+Copyright (c) Dyad contributors
+
+Argo's BUILDING-state file-streaming generator and sandbox bootstrapper are
+descended from Dyad's design. Files lifted from upstream are annotated with
+`// argo:upstream dyad@<sha>` and listed in /docs/UPSTREAM.md.
+
+Full Apache 2.0 license: http://www.apache.org/licenses/LICENSE-2.0

@@ -1,0 +1,16 @@
+Argo
+Copyright 2026 AlgoRythmTech
+
+This product includes software developed by:
+
+  * Open Lovable — https://github.com/firecrawl/open-lovable (Apache-2.0)
+    Used as the basis of /packages/build-engine. Files lifted from upstream
+    are annotated with `// argo:upstream open-lovable@<sha>`.
+
+  * Cline — https://github.com/cline/cline (Apache-2.0)
+    Patterns (not code) lifted for the human-in-the-loop approval UX.
+
+  * OpenHands — https://github.com/All-Hands-AI/OpenHands (MIT)
+    Prior art studied for agent event taxonomy.
+
+License files for all upstream dependencies live in /licenses/.

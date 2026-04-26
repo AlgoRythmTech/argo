@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.pnp.*
+
+# Builds
+dist/
+build/
+.next/
+.turbo/
+.vite/
+*.tsbuildinfo
+
+# Environments — NEVER commit secrets
+.env
+.env.*
+!.env.example
+.envrc
+.envrc.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# IDE
+.vscode/
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Coverage / tests
+coverage/
+.nyc_output/
+*.lcov
+
+# Prisma
+apps/api/prisma/migrations/dev/
+
+# Generated artifacts
+generated/
+*.generated.ts
+
+# Per-customer operation bundles (live in MongoDB or Blaxel)
+operations/
+
+# OS
+.DS_Store
+
+# Local docker volumes
+infra/docker/volumes/
+
+# Argo runtime caches
+.argo/

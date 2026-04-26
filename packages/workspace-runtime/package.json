@@ -1,0 +1,36 @@
+{
+  "name": "@argo/workspace-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./providers/execution": "./src/providers/execution.ts",
+    "./providers/blaxel": "./src/providers/blaxel.ts",
+    "./providers/docker-mock": "./src/providers/docker-mock.ts",
+    "./providers/build-sandbox": "./src/providers/build-sandbox.ts",
+    "./providers/e2b": "./src/providers/e2b.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "vitest run",
+    "lint": "echo 'lint: nothing to do'"
+  },
+  "dependencies": {
+    "@argo/shared-types": "workspace:*",
+    "@argo/security": "workspace:*",
+    "@blaxel/core": "^1.0.0",
+    "nanoid": "^5.0.7",
+    "pino": "^9.3.2",
+    "undici": "^6.19.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.0"
+  }
+}

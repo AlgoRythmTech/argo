@@ -1,0 +1,35 @@
+{
+  "name": "@argo/build-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./generate": "./src/generate.ts",
+    "./validators": "./src/validators/index.ts",
+    "./generators": "./src/generators/index.ts",
+    "./test-suite": "./src/test-suite.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "vitest run",
+    "lint": "echo 'lint: nothing to do'"
+  },
+  "dependencies": {
+    "@argo/shared-types": "workspace:*",
+    "@argo/security": "workspace:*",
+    "@argo/workspace-runtime": "workspace:*",
+    "@argo/agent": "workspace:*",
+    "nanoid": "^5.0.7",
+    "pino": "^9.3.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.0"
+  }
+}

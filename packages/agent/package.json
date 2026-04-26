@@ -1,0 +1,40 @@
+{
+  "name": "@argo/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./envelope": "./src/envelope.ts",
+    "./router": "./src/llm/router.ts",
+    "./openai": "./src/llm/openai.ts",
+    "./anthropic": "./src/llm/anthropic.ts",
+    "./listening": "./src/listening/index.ts",
+    "./mapping": "./src/mapping/index.ts",
+    "./running": "./src/running/index.ts",
+    "./repair": "./src/repair/index.ts",
+    "./digest": "./src/digest/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "vitest run",
+    "lint": "echo 'lint: nothing to do'"
+  },
+  "dependencies": {
+    "@argo/shared-types": "workspace:*",
+    "@argo/security": "workspace:*",
+    "nanoid": "^5.0.7",
+    "pino": "^9.3.2",
+    "undici": "^6.19.5",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.23.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.0"
+  }
+}

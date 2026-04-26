@@ -1,0 +1,10 @@
+Open Lovable — https://github.com/firecrawl/open-lovable
+Apache License, Version 2.0
+
+Copyright (c) Firecrawl / Open Lovable contributors
+
+Argo's per-step code generators borrow Open Lovable's file-by-file
+streaming pattern. Files lifted from upstream are annotated with
+`// argo:upstream open-lovable@<sha>` and listed in /docs/UPSTREAM.md.
+
+Full Apache 2.0 license: http://www.apache.org/licenses/LICENSE-2.0

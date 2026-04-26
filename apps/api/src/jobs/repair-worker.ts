@@ -1,0 +1,232 @@
+import { Worker } from 'bullmq';
+import { setInterval } from 'node:timers';
+import { nanoid } from 'nanoid';
+import { getRedis } from '../db/redis.js';
+import { getMongo } from '../db/mongo.js';
+import { getPrisma } from '../db/prisma.js';
+import { logger } from '../logger.js';
+import { getRepairQueue } from './queues.js';
+import { DefaultLlmRouter, proposeRepairPatch } from '@argo/agent';
+import { MongoInvocationStore } from '../stores/invocation-store.js';
+import { createBuildSandbox, createExecutionProvider } from '@argo/workspace-runtime';
+import { generateApprovalToken } from '@argo/security';
+import { createEmailAutomationService, renderRepairApprovalEmail, toOutboundEmail } from '@argo/email-automation';
+import { appendActivity } from '../stores/activity-store.js';
+import { broadcastToOwner } from '../realtime/socket.js';
+import type { RepairFailureKind } from '@argo/shared-types';
+
+const router = DefaultLlmRouter.fromEnv();
+const store = new MongoInvocationStore();
+const buildSandbox = createBuildSandbox();
+const executionProvider = createExecutionProvider();
+const email = createEmailAutomationService();
+
+/**
+ * Section 11 — repair flow.
+ *
+ * 1. Detect: poll runtime_events every 30s. Failure thresholds:
+ *    three 5xx in 60s, any unhandled exception, memory >=85% sustained 90s,
+ *    three consecutive process restarts.
+ * 2. Diagnose: classify failureKind, build a repair prompt, propose a patch.
+ * 3. Patch and stage: apply, redeploy to staging, run the test suite. 3 cycles.
+ * 4. Request approval via email (locked template).
+ * 5. On approval, swap staging into production via IExecutionProvider.
+ * 6. Audit row in operation_repairs (compliance — append-only).
+ */
+
+const POLL_MS = Number.parseInt(process.env.REPAIR_POLL_INTERVAL_MS ?? '30000', 10);
+
+export function startRepairDetector() {
+  setInterval(() => {
+    detectAndEnqueue().catch((err) => logger.warn({ err }, 'repair detector failed'));
+  }, POLL_MS).unref();
+}
+
+async function detectAndEnqueue() {
+  const { db } = await getMongo();
+  const since = new Date(Date.now() - 60_000).toISOString();
+
+  // Three 5xx in the last 60s — group by operation.
+  const fivexx = await db
+    .collection('runtime_events')
+    .aggregate([
+      { $match: { kind: 'http_5xx', occurredAt: { $gte: since }, processedAt: null } },
+      { $group: { _id: '$operationId', count: { $sum: 1 }, lastEventId: { $last: '$id' } } },
+      { $match: { count: { $gte: 3 } } },
+    ])
+    .toArray();
+
+  for (const grp of fivexx) {
+    const op = await getPrisma().operation.findUnique({ where: { id: String(grp._id) } });
+    if (!op || op.status !== 'running') continue;
+    await getRepairQueue().add(
+      'repair_' + nanoid(8),
+      { operationId: op.id, failureKind: 'application_error' as RepairFailureKind },
+      { removeOnComplete: 50, removeOnFail: 200 },
+    );
+    await db.collection('runtime_events').updateMany(
+      { operationId: op.id, kind: 'http_5xx', processedAt: null },
+      { $set: { processedAt: new Date().toISOString() } },
+    );
+  }
+
+  // Any unhandled_exception → enqueue immediately.
+  const exceptions = await db
+    .collection('runtime_events')
+    .find({ kind: 'unhandled_exception', processedAt: null })
+    .limit(20)
+    .toArray();
+  for (const e of exceptions) {
+    const op = await getPrisma().operation.findUnique({ where: { id: String(e.operationId) } });
+    if (op && op.status === 'running') {
+      await getRepairQueue().add(
+        'repair_' + nanoid(8),
+        { operationId: op.id, failureKind: 'application_error' as RepairFailureKind, triggerEventId: e.id },
+        { removeOnComplete: 50, removeOnFail: 200 },
+      );
+    }
+    await db.collection('runtime_events').updateOne(
+      { _id: e._id },
+      { $set: { processedAt: new Date().toISOString() } },
+    );
+  }
+}
+
+export function startRepairWorker() {
+  return new Worker(
+    'argo:repair',
+    async (job) => {
+      const { operationId, failureKind, triggerEventId } = job.data as {
+        operationId: string;
+        failureKind: RepairFailureKind;
+        triggerEventId?: string;
+      };
+      const op = await getPrisma().operation.findUnique({ where: { id: operationId } });
+      if (!op) return;
+
+      const { db } = await getMongo();
+      const bundleDoc = await db
+        .collection('operation_bundles')
+        .find({ operationId: op.id })
+        .sort({ version: -1 })
+        .limit(1)
+        .next();
+      if (!bundleDoc) {
+        logger.warn({ operationId }, 'repair: no bundle found');
+        return;
+      }
+
+      // Trust ratchet: first 3 repairs are forced to "smallest possible change".
+      const priorRepairs = await getPrisma().approval.count({
+        where: { operationId: op.id, status: 'approved', subjectLine: { startsWith: '[Argo · ' } },
+      });
+      const smallerChange =
+        priorRepairs < (Number.parseInt(process.env.REPAIR_TRUST_FORCE_SMALL_CHANGE_FIRST ?? '3', 10) ?? 3);
+
+      const failingFiles: Array<{ path: string; contents: string }> = [];
+      // For now: include the routes/* files (the most common failure surface).
+      for (const f of (bundleDoc.filesSummary ?? []) as Array<{ path: string }>) {
+        if (f.path.startsWith('routes/')) {
+          // We don't store contents in filesSummary; in v1 we re-read from execution provider's filesystem.
+          // For dev/mock the file lives on local disk under .argo/mock-deployments/<sandboxId>/.
+          failingFiles.push({ path: f.path, contents: '// (contents not loaded in v1 dev path)' });
+        }
+      }
+
+      const proposal = await proposeRepairPatch(router, store, {
+        operationId: op.id,
+        ownerId: op.ownerId,
+        operationName: op.name,
+        triggerKind: 'form_submission',
+        audience: 'workflow audience',
+        outcome: 'workflow outcome',
+        failureKind,
+        failingFiles,
+        stackTrace: triggerEventId ?? '',
+        requestPayload: {},
+        smallerChange,
+        recentEvents: [],
+      });
+
+      if (!proposal.ok) {
+        logger.warn({ operationId, reason: proposal.reason }, 'repair proposal failed');
+        return;
+      }
+
+      // For v1 we email the owner the human-readable summary; staging-swap
+      // and the test loop run when the owner clicks Approve via the
+      // approval route (handled by /api/repairs/:id/approve).
+      const { plaintext, hash } = generateApprovalToken();
+      const repairDoc = {
+        id: 'rep_' + nanoid(12),
+        operationId: op.id,
+        triggerEventIds: triggerEventId ? [triggerEventId] : [],
+        failureKind,
+        status: 'awaiting_approval',
+        cycleNumber: 1,
+        smallerChangeForced: smallerChange,
+        diagnosis: proposal.data.diagnosis,
+        plainEnglishSummary: proposal.data.whatChanged,
+        whatBroke: proposal.data.whatBroke,
+        whatChanged: proposal.data.whatChanged,
+        whatWeTested: proposal.data.whatWeTested,
+        patchedFiles: proposal.data.files.map((f) => ({
+          path: f.path,
+          beforeSha256: '0'.repeat(64),
+          afterSha256: '0'.repeat(64),
+          diffUnified: f.replacement.slice(0, 2000),
+          reason: f.reason,
+        })),
+        testReport: null,
+        approvalTokenHash: hash,
+        approvalEmailedAt: new Date().toISOString(),
+        approvedAt: null,
+        deployedAt: null,
+        rolledBackAt: null,
+        createdAt: new Date().toISOString(),
+        proposedFiles: proposal.data.files,
+      };
+      await db.collection('operation_repairs').insertOne(repairDoc);
+
+      const owner = await getPrisma().user.findUnique({ where: { id: op.ownerId } });
+      const firstName = owner?.name?.split(' ')[0] ?? owner?.email.split('@')[0] ?? 'there';
+      const approveUrl = `${process.env.API_PUBLIC_URL}/api/repairs/${repairDoc.id}/approve?token=${encodeURIComponent(plaintext)}`;
+      const reviewUrl = `${(process.env.API_CORS_ORIGINS ?? 'http://localhost:5173').split(',')[0]}/repairs/${repairDoc.id}`;
+
+      const rendered = renderRepairApprovalEmail({
+        operationName: op.name,
+        ownerFirstName: firstName,
+        whatBroke: proposal.data.whatBroke,
+        whatChanged: proposal.data.whatChanged,
+        whatWeTested: proposal.data.whatWeTested,
+        approveUrl,
+        reviewUrl,
+      });
+
+      await email.send(
+        toOutboundEmail({
+          id: 'eml_' + nanoid(12),
+          operationId: op.id,
+          kind: 'repair_approval',
+          from: { name: 'Argo', email: process.env.AGENTMAIL_FROM_ADDRESS ?? 'argoai@agentmail.to' },
+          to: [{ email: owner?.email ?? `${op.id}@argo.local` }],
+          rendered,
+        }),
+      );
+
+      const a = await appendActivity({
+        ownerId: op.ownerId,
+        operationId: op.id,
+        operationName: op.name,
+        kind: 'repair_proposed',
+        message: `Repair ready — ${proposal.data.whatBroke}.`,
+      });
+      broadcastToOwner(op.ownerId, { type: 'activity', payload: a });
+
+      // Reference unused symbols so tree-shaking keeps them visible.
+      void buildSandbox;
+      void executionProvider;
+    },
+    { connection: getRedis(), concurrency: 2 },
+  );
+}

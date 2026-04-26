@@ -1,0 +1,35 @@
+{
+  "name": "argo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Argo — AI Business Operator. Describe the workflow once. Argo runs it. Reply to email when it asks.",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20.10.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm run --recursive --parallel --stream dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r --parallel typecheck",
+    "test": "pnpm -r --parallel test",
+    "lint": "pnpm -r --parallel lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
+    "infra:up": "docker compose -f infra/docker/docker-compose.dev.yml up -d",
+    "infra:down": "docker compose -f infra/docker/docker-compose.dev.yml down",
+    "infra:logs": "docker compose -f infra/docker/docker-compose.dev.yml logs -f",
+    "infra:reset": "docker compose -f infra/docker/docker-compose.dev.yml down -v && docker compose -f infra/docker/docker-compose.dev.yml up -d",
+    "db:generate": "pnpm --filter @argo/api db:generate",
+    "db:migrate": "pnpm --filter @argo/api db:migrate",
+    "db:seed": "pnpm --filter @argo/api db:seed",
+    "db:studio": "pnpm --filter @argo/api db:studio",
+    "preflight": "pnpm typecheck && pnpm test && pnpm lint",
+    "argo:bootstrap": "node scripts/bootstrap.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "prettier": "^3.3.3",
+    "typescript": "^5.5.4"
+  }
+}
