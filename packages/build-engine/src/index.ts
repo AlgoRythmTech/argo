@@ -12,3 +12,6 @@ export * from './validators/index.js';
 export * from './test-suite.js';
 export * from './bundle-builder.js';
 export * from './header.js';
+export * from './dyad-tag-parser.js';
+export * from './quality-gate.js';
+export * from './auto-fix-loop.js';

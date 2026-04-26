@@ -17,6 +17,7 @@ import { registerDeployRoutes } from './routes/deploy.js';
 import { registerInternalRoutes } from './routes/internal.js';
 import { registerWebhookRoutes } from './routes/webhooks.js';
 import { registerRepairsRoutes } from './routes/repairs.js';
+import { registerBuildStreamRoutes } from './routes/build-stream.js';
 import { registerAuthPlugin } from './plugins/auth-plugin.js';
 import { attachSocketIo } from './realtime/socket.js';
 import { startDigestWorker } from './jobs/digest-worker.js';
@@ -60,6 +61,7 @@ async function main() {
   await registerInternalRoutes(app);
   await registerWebhookRoutes(app);
   await registerRepairsRoutes(app);
+  await registerBuildStreamRoutes(app);
 
   // Eager init.
   await getMongo();

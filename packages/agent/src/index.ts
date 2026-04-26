@@ -3,6 +3,8 @@ export * from './invocation.js';
 export * from './llm/router.js';
 export * from './llm/openai.js';
 export * from './llm/anthropic.js';
+export * from './llm/specialist-prompts.js';
+export * from './llm/stream-build.js';
 export * from './listening/index.js';
 export * from './mapping/index.js';
 export * from './running/index.js';
