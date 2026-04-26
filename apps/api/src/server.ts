@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import helmet from '@fastify/helmet';
 import cors from '@fastify/cors';
 import sensible from '@fastify/sensible';
@@ -26,12 +26,15 @@ import { startRepairDetector, startRepairWorker } from './jobs/repair-worker.js'
 async function main() {
   const cfg = getConfig();
 
+  // Cast through `unknown` to widen the Pino-narrowed FastifyInstance back
+  // to the default-shaped one our route registrars expect. This is a known
+  // friction with Fastify v4 + a custom Pino logger instance.
   const app = Fastify({
-    logger,
+    logger: logger as never,
     trustProxy: true,
     bodyLimit: 4_000_000,
     disableRequestLogging: cfg.NODE_ENV === 'production',
-  });
+  }) as unknown as FastifyInstance;
 
   await app.register(helmet, { global: true });
   await app.register(cors, {

@@ -22,10 +22,12 @@
   "dependencies": {
     "@argo/shared-types": "workspace:*",
     "@argo/security": "workspace:*",
+    "agentmail": "^0.4.20",
     "nodemailer": "^6.9.14",
     "mailparser": "^3.7.1",
     "nanoid": "^5.0.7",
     "pino": "^9.3.2",
+    "svix": "^1.92.2",
     "undici": "^6.19.5",
     "zod": "^3.23.8"
   },

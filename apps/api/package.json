@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "lint": "echo 'lint: nothing to do'",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

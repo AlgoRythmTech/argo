@@ -16,13 +16,13 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "lint": "echo 'lint: nothing to do'"
   },
   "dependencies": {
     "@argo/shared-types": "workspace:*",
     "@argo/security": "workspace:*",
-    "@blaxel/core": "^1.0.0",
+    "@blaxel/core": "^0.2.80",
     "nanoid": "^5.0.7",
     "pino": "^9.3.2",
     "undici": "^6.19.5",

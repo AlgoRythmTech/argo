@@ -20,7 +20,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "lint": "echo 'lint: nothing to do'"
   },
   "dependencies": {

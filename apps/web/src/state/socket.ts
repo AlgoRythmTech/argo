@@ -23,7 +23,7 @@ type ServerEvent =
     }
   | { type: 'map_updated'; operationId: string; version: number };
 
-export function connectSocket() {
+export function connectSocket(): Socket {
   if (socket && socket.connected) return socket;
   socket = io({
     path: '/socket.io',

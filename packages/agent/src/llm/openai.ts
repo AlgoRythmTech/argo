@@ -67,6 +67,28 @@ export class OpenAiClient {
   async completeJson<TSchema extends z.ZodTypeAny>(
     args: OpenAiCompleteArgs<TSchema>,
   ): Promise<LlmCallResult> {
+    const candidates = uniqueModels([args.model, process.env.OPENAI_MODEL_FALLBACK ?? 'gpt-4o']);
+    let lastErr: Error | null = null;
+    for (const model of candidates) {
+      try {
+        return await this.completeJsonOnce({ ...args, model });
+      } catch (err) {
+        const e = err as Error & { status?: number; reason?: string };
+        const transient =
+          e.status === 404 ||
+          e.status === 400 ||
+          /model_not_found|does not exist|invalid model/i.test(e.message ?? '');
+        if (!transient) throw err;
+        lastErr = e;
+        log.warn({ model, err: e.message }, 'openai model unavailable, falling back');
+      }
+    }
+    throw lastErr ?? new Error('OpenAI completion failed across all candidates');
+  }
+
+  private async completeJsonOnce<TSchema extends z.ZodTypeAny>(
+    args: OpenAiCompleteArgs<TSchema>,
+  ): Promise<LlmCallResult> {
     const jsonSchema = zodToJsonSchema(args.schema, args.schemaName);
 
     const body = {
@@ -99,11 +121,14 @@ export class OpenAiClient {
     });
     const text = await res.body.text();
     if (res.statusCode === 400 && text.includes('response_format')) {
-      // Fall back: model doesn't support json_schema — retry with json_object.
       return this.completeJsonObject(args);
     }
     if (res.statusCode >= 400) {
-      throw new Error(`OpenAI ${args.model} -> ${res.statusCode}: ${text.slice(0, 400)}`);
+      const e: Error & { status?: number } = new Error(
+        `OpenAI ${args.model} -> ${res.statusCode}: ${text.slice(0, 400)}`,
+      );
+      e.status = res.statusCode;
+      throw e;
     }
     return this.unwrapResponse(text, args.model);
   }
@@ -159,6 +184,18 @@ export class OpenAiClient {
       costUsd: null,
     };
   }
+}
+
+function uniqueModels(models: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of models) {
+    if (!m) continue;
+    if (seen.has(m)) continue;
+    seen.add(m);
+    out.push(m);
+  }
+  return out;
 }
 
 function tolerantJsonParse(content: string): unknown {

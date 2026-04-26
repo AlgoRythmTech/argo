@@ -17,7 +17,7 @@ export async function registerRepairsRoutes(app: FastifyInstance) {
       where: { ownerId: session.userId },
       select: { id: true },
     });
-    const ids = ops.map((o) => o.id);
+    const ids = ops.map((o: { id: string }) => o.id);
     const docs = await db
       .collection('operation_repairs')
       .find({ operationId: { $in: ids } })

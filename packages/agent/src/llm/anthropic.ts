@@ -75,6 +75,32 @@ export class AnthropicClient {
   async completeJson<TSchema extends z.ZodTypeAny>(
     args: AnthropicCompleteArgs<TSchema>,
   ): Promise<LlmCallResult> {
+    const candidates = uniqueModels([
+      args.model,
+      process.env.ANTHROPIC_MODEL_FALLBACK ?? 'claude-sonnet-4-5',
+      'claude-sonnet-4-20250514',
+    ]);
+    let lastErr: Error | null = null;
+    for (const model of candidates) {
+      try {
+        return await this.completeJsonOnce({ ...args, model });
+      } catch (err) {
+        const e = err as Error & { status?: number };
+        const transient =
+          e.status === 404 ||
+          e.status === 400 ||
+          /not_found_error|invalid model|model.*not exist/i.test(e.message ?? '');
+        if (!transient) throw err;
+        lastErr = e;
+        log.warn({ model, err: e.message }, 'anthropic model unavailable, falling back');
+      }
+    }
+    throw lastErr ?? new Error('Anthropic completion failed across all candidates');
+  }
+
+  private async completeJsonOnce<TSchema extends z.ZodTypeAny>(
+    args: AnthropicCompleteArgs<TSchema>,
+  ): Promise<LlmCallResult> {
     const useEmergent = this.cfg.emergentEnabled && this.cfg.emergentApiKey.length > 0;
     const apiBase = useEmergent ? this.cfg.emergentApiBase : this.cfg.apiBase;
     const url = `${apiBase}/v1/messages`;
@@ -119,7 +145,11 @@ export class AnthropicClient {
 
     const text = await res.body.text();
     if (res.statusCode >= 400) {
-      throw new Error(`Anthropic ${args.model} -> ${res.statusCode}: ${text.slice(0, 400)}`);
+      const e: Error & { status?: number } = new Error(
+        `Anthropic ${args.model} -> ${res.statusCode}: ${text.slice(0, 400)}`,
+      );
+      e.status = res.statusCode;
+      throw e;
     }
 
     const parsed = JSON.parse(text) as {
@@ -153,6 +183,18 @@ export class AnthropicClient {
       costUsd: null,
     };
   }
+}
+
+function uniqueModels(models: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of models) {
+    if (!m) continue;
+    if (seen.has(m)) continue;
+    seen.add(m);
+    out.push(m);
+  }
+  return out;
 }
 
 function tolerantJsonParse(content: string): unknown {

@@ -17,6 +17,7 @@ import { PromptInputBox } from '../components/ui/ai-prompt-box.js';
 import { AgentPlan, type AgentTask } from '../components/ui/agent-plan.js';
 import { AiLoader } from '../components/ui/ai-loader.js';
 import { LiquidButton } from '../components/ui/liquid-glass-button.js';
+import { Input } from '../components/ui/input.js';
 import { cn } from '../lib/utils.js';
 
 type BuilderState =
@@ -397,7 +398,8 @@ function shortUrl(url: string) {
   }
 }
 
-function loaderText(state: BuilderState, deployPhase: typeof useArgo extends never ? never : 'idle' | 'building' | 'testing' | 'deploying' | 'ready' | 'failed'): string {
+type DeployPhaseTag = 'idle' | 'building' | 'testing' | 'deploying' | 'ready' | 'failed';
+function loaderText(state: BuilderState, deployPhase: DeployPhaseTag): string {
   if (state.phase === 'mapping') return 'Mapping';
   if (deployPhase === 'building') return 'Building';
   if (deployPhase === 'testing') return 'Testing';
