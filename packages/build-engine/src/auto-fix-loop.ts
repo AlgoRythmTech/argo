@@ -23,6 +23,17 @@ export interface AutoFixArgs {
     workflowMapVersion: number;
     requiredEnv: string[];
   };
+  /**
+   * Forwarded to streamBuild. When set, the agent picks reference snippets
+   * + recalls operator memory and folds them into the system prompt.
+   */
+  augmentation?: {
+    trigger?: string;
+    integrations?: readonly string[];
+    auth?: string;
+    dataClassification?: string;
+    ownerId?: string;
+  };
   /** Max retry cycles. Default 3 (Section 11 doctrine). */
   maxCycles?: number;
   /** Per-cycle progress callback. */
@@ -85,6 +96,18 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
       for await (const chunk of streamBuild({
         specialist: args.specialist,
         userPrompt,
+        ...(args.augmentation
+          ? {
+              augmentation: {
+                ...(args.augmentation.trigger !== undefined ? { trigger: args.augmentation.trigger } : {}),
+                ...(args.augmentation.integrations !== undefined ? { integrations: args.augmentation.integrations } : {}),
+                ...(args.augmentation.auth !== undefined ? { auth: args.augmentation.auth } : {}),
+                ...(args.augmentation.dataClassification !== undefined ? { dataClassification: args.augmentation.dataClassification } : {}),
+                ...(args.augmentation.ownerId !== undefined ? { ownerId: args.augmentation.ownerId } : {}),
+                operationId: args.manifest.operationId,
+              },
+            }
+          : {}),
         ...(args.signal ? { signal: args.signal } : {}),
       })) {
         if (chunk.delta && args.onChunk) args.onChunk(chunk.delta, chunk.fullText);

@@ -15,6 +15,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { runAutoFixLoop, type AutoFixCycleEvent } from '@argo/build-engine';
 import { pickSpecialist } from '@argo/agent';
 import { getPrisma } from '../db/prisma.js';
+import { getMongo } from '../db/mongo.js';
 import { requireSession } from '../plugins/auth-plugin.js';
 
 const Body = z.object({
@@ -93,6 +94,23 @@ export async function registerBuildStreamRoutes(app: FastifyInstance) {
         bundleVersion: op.bundleVersion + 1,
       });
 
+      // If the operator already finalised a brief, derive augmentation
+      // from it so the build agent gets reference snippets + memory.
+      const { db } = await getMongo();
+      const briefDoc = await db
+        .collection('project_briefs')
+        .find({ operationId: op.id })
+        .sort({ persistedAt: -1 })
+        .limit(1)
+        .next();
+      type BriefShape = {
+        trigger?: string;
+        integrations?: string[];
+        auth?: string;
+        dataClassification?: string;
+      };
+      const brief = (briefDoc ?? null) as BriefShape | null;
+
       const result = await runAutoFixLoop({
         specialist,
         userPrompt: parsed.data.prompt,
@@ -102,6 +120,13 @@ export async function registerBuildStreamRoutes(app: FastifyInstance) {
           bundleVersion: op.bundleVersion + 1,
           workflowMapVersion: op.workflowMapVersion,
           requiredEnv: ['ARGO_OPERATION_ID', 'ARGO_CONTROL_PLANE_URL', 'INTERNAL_API_KEY', 'MONGODB_URI'],
+        },
+        augmentation: {
+          ...(brief?.trigger ? { trigger: brief.trigger } : {}),
+          ...(brief?.integrations ? { integrations: brief.integrations } : {}),
+          ...(brief?.auth ? { auth: brief.auth } : {}),
+          ...(brief?.dataClassification ? { dataClassification: brief.dataClassification } : {}),
+          ownerId: session.userId,
         },
         signal: ac.signal,
         onChunk: (delta) => writeEvent('chunk', { delta }),

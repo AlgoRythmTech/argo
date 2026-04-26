@@ -19,6 +19,8 @@ import { AiLoader } from '../components/ui/ai-loader.js';
 import { LiquidButton } from '../components/ui/liquid-glass-button.js';
 import { Input } from '../components/ui/input.js';
 import { PreviewPane } from '../components/PreviewPane.js';
+import { ScopingPanel } from '../components/ScopingPanel.js';
+import { BuildStream } from '../components/BuildStream.js';
 import { cn } from '../lib/utils.js';
 
 type BuilderState =
@@ -54,6 +56,7 @@ export function Workspace() {
   const [builderState, setBuilderState] = useState<BuilderState>({ phase: 'idle' });
   const [isPromptLoading, setPromptLoading] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [activeBuildPrompt, setActiveBuildPrompt] = useState<string | null>(null);
 
   const activeOp = useMemo(() => ops.find((o) => o.id === activeId) ?? null, [ops, activeId]);
 
@@ -302,7 +305,20 @@ export function Workspace() {
               </h3>
               <AgentPlan tasks={tasks} initialExpandedIds={tasks.map((t) => t.id)} />
             </div>
-            <PreviewPane operation={activeOp} />
+            {activeBuildPrompt && activeOp ? (
+              <BuildStream
+                operationId={activeOp.id}
+                prompt={activeBuildPrompt}
+                onComplete={() => undefined}
+              />
+            ) : activeOp && !activeOp.publicUrl ? (
+              <ScopingPanel
+                operationId={activeOp.id}
+                onBriefReady={(prompt) => setActiveBuildPrompt(prompt)}
+              />
+            ) : (
+              <PreviewPane operation={activeOp} />
+            )}
           </div>
 
           {/* Bottom: prompt box */}

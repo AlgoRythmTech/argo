@@ -5,6 +5,11 @@
 
 import { request } from 'undici';
 import { buildSpecialistSystemPrompt, type Specialist } from './specialist-prompts.js';
+import { renderSnippetsAsPromptSection, selectSnippets } from '../reference/snippets.js';
+import {
+  recallRelevantMemories,
+  renderMemoriesAsPromptSection,
+} from '../supermemory/context-augment.js';
 
 export interface StreamBuildArgs {
   specialist: Specialist;
@@ -18,6 +23,19 @@ export interface StreamBuildArgs {
   signal?: AbortSignal;
   /** Soft cap on completion tokens. Default 8000 — enough for ~10 files. */
   maxTokens?: number;
+  /**
+   * Which reference patterns + memories to inject into the system prompt.
+   * Drives selectSnippets() and supermemory recall. When omitted, no
+   * augmentation happens and the build runs on the bare specialist prompt.
+   */
+  augmentation?: {
+    trigger?: string;
+    integrations?: readonly string[];
+    auth?: string;
+    dataClassification?: string;
+    ownerId?: string;
+    operationId?: string;
+  };
 }
 
 export interface StreamBuildChunk {
@@ -51,17 +69,47 @@ export async function* streamBuild(args: StreamBuildArgs): AsyncGenerator<Stream
   const candidates = unique([primary, fallback]);
   let lastErr: Error | null = null;
 
+  // Build the augmented system prompt ONCE before entering the model
+  // fallback loop — both candidates see the same system context.
+  const baseSystem = buildSpecialistSystemPrompt(args.specialist);
+  let augmented = baseSystem;
+
+  if (args.augmentation) {
+    const snippets = selectSnippets({
+      trigger: args.augmentation.trigger ?? 'form_submission',
+      integrations: args.augmentation.integrations ?? [],
+      auth: args.augmentation.auth ?? 'none',
+      dataClassification: args.augmentation.dataClassification ?? 'pii',
+      specialist: args.specialist,
+    });
+    const snippetSection = renderSnippetsAsPromptSection(snippets);
+    let memorySection = '';
+    if (args.augmentation.ownerId) {
+      try {
+        const memories = await recallRelevantMemories({
+          ownerId: args.augmentation.ownerId,
+          ...(args.augmentation.operationId !== undefined ? { operationId: args.augmentation.operationId } : {}),
+          query: args.userPrompt,
+        });
+        memorySection = renderMemoriesAsPromptSection(memories);
+      } catch {
+        // supermemory is best-effort; never fail the build because recall failed.
+      }
+    }
+    augmented = [baseSystem, snippetSection, memorySection].filter(Boolean).join('\n\n');
+  }
+
   for (const model of candidates) {
     try {
       yield* streamOnce({
         apiBase,
         apiKey,
         model,
-        system: buildSpecialistSystemPrompt(args.specialist),
+        system: augmented,
         userPrompt: args.userPrompt,
-        context: args.context,
+        ...(args.context !== undefined ? { context: args.context } : {}),
         maxTokens: args.maxTokens ?? 8000,
-        signal: args.signal,
+        ...(args.signal ? { signal: args.signal } : {}),
       });
       return;
     } catch (err) {

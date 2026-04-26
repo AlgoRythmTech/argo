@@ -10,3 +10,6 @@ export * from './mapping/index.js';
 export * from './running/index.js';
 export * from './repair/index.js';
 export * from './digest/index.js';
+export * from './scoping/index.js';
+export * from './reference/index.js';
+export * from './supermemory/index.js';
