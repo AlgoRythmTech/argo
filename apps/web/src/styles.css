@@ -43,9 +43,54 @@ body,
   background: hsl(var(--background));
   color: hsl(var(--foreground));
   margin: 0;
-  font-family: 'Geist', 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  /* Locked typography per founder spec — Inter, weight 500 only. */
+  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.55;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+/* Force the locked weight on every element — Tailwind's font-{weight}
+   utilities all map to 500 via the config, but raw HTML (h1, strong, b)
+   would still pick browser defaults. Override them here. */
+h1, h2, h3, h4, h5, h6, strong, b {
+  font-weight: 500;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  letter-spacing: -0.05em;
+  line-height: 1.05;
+}
+
+/* Argo brand wordmark — used wherever the literal word "Argo" appears
+   as decorative type. The clipped gradient is the locked spec. */
+.argo-wordmark {
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  font-weight: 500;
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+  background: linear-gradient(to bottom right, #f2f0eb 40%, rgba(242, 240, 235, 0.45));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Hero text variant — Inter-500 with the spec's hero line-height. */
+.argo-hero {
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  font-weight: 500;
+  letter-spacing: -0.05em;
+  line-height: 1.05;
+}
+
+/* Body variant — keeps the spec body line-height + tracking. */
+.argo-body {
+  letter-spacing: -0.025em;
+  line-height: 1.55;
 }
 
 /* Status-dot pulse — Section 9: 2s, never above 1.0 opacity. */

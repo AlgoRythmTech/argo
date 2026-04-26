@@ -103,6 +103,22 @@ export const auth = {
   logout: () => api.post<{ ok: true }>('/auth/logout'),
 };
 
+export type GeneratedFileSummary = {
+  path: string;
+  sha256: string;
+  argoGenerated: boolean;
+  size: number;
+};
+
+export type GeneratedBundle = {
+  operationId: string;
+  version: number;
+  generatedByModel: string;
+  files: GeneratedFileSummary[];
+};
+
+export type PreviewAction = 'refresh' | 'restart' | 'rebuild';
+
 export const operations = {
   list: () => api.get<Operation[]>('/api/operations'),
   create: (input: { name: string; timezone?: string }) =>
@@ -116,6 +132,11 @@ export const operations = {
       '/api/operations/deploy',
       { operationId: id },
     ),
+  files: (id: string) => api.get<GeneratedBundle>(`/api/operations/${id}/files`),
+  previewAction: (id: string, action: PreviewAction) =>
+    api.post<{ ok: true; action: PreviewAction }>(`/api/operations/${id}/preview-action`, {
+      action,
+    }),
 };
 
 export const builder = {

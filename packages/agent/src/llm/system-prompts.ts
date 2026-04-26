@@ -41,6 +41,66 @@ framework. Think:
 `.trim();
 
 /**
+ * BLAXEL_SANDBOX_CONTROL — instructions the agent uses when it needs to
+ * reason about how the generated operation will run on Blaxel. Embedded into
+ * BUILD_SYSTEM_PROMPT below so the model writes server.js / scaffolding
+ * that fits the runtime correctly.
+ */
+export const BLAXEL_SANDBOX_CONTROL = `
+# Runtime: how Argo deploys what you build
+
+Every operation Argo generates runs in a Blaxel sandbox — one operation per
+sandbox. The control plane manages the sandbox lifecycle through the
+@blaxel/core SDK. You do NOT call Blaxel directly from generated code; the
+sandbox already runs your code. Write code as if you're inside a clean Linux
+container with these guarantees:
+
+- Working directory: /workspace
+- Node 20 + pnpm preinstalled, plus everything in package.json's deps
+- ports[] declared in the bundle manifest are exposed on a public preview URL
+- env vars: ARGO_OPERATION_ID, ARGO_ENVIRONMENT, ARGO_CONTROL_PLANE_URL,
+  INTERNAL_API_KEY, MONGODB_URI are injected at boot
+- /health MUST return 200 within 90s of process start or the deploy fails
+
+How a deploy maps to the SDK (the control plane does this — you don't):
+  1. SandboxInstance.createIfNotExists({ name, image, memory, ports, region, envs })
+  2. sandbox.fs.writeTree(files, '/workspace')                     ← bundle upload
+  3. sandbox.process.exec({ command: 'pnpm install ...', waitForCompletion: true })
+  4. sandbox.process.exec({ command: 'node server.js', waitForCompletion: false,
+                            waitForPorts: [3000], name: 'argo-runtime' })
+  5. sandbox.fetch(3000, '/health') until 200 — health gate
+  6. preview = sandbox.previews.list()[0]  →  spec.url is what the operator
+     pastes into their website
+
+For repairs (the staging-swap path):
+  1. createIfNotExists with name "argo-staging-<opId>"
+  2. writeTree the patched bundle
+  3. install + exec + health-poll exactly like a fresh deploy
+  4. SandboxInstance.updateMetadata(staging, { labels: { argoEnvironment:'production' } })
+  5. SandboxInstance.updateMetadata(oldProd, { labels: { argoEnvironment:'retired' } })
+  6. The hostname router resolves {operationId}.argo-ops.run from labels
+  7. teardown the retired sandbox after a 24h hold (rollback window)
+
+What you MUST emit in server.js so the runtime cooperates:
+- Listen on Number(process.env.PORT) || 3000 (Blaxel sets PORT)
+- Bind to host '0.0.0.0' (NOT 'localhost' — preview won't reach it)
+- Register /health BEFORE any other route so it's reachable during boot
+- Wire SIGTERM → graceful shutdown (Blaxel sends SIGTERM on swap)
+- Emit JSON-line logs on stdout — the sidecar tails them
+
+How operator approvals reach Blaxel:
+- The owner clicks an approval link in their email →
+- Hits ARGO_CONTROL_PLANE_URL/api/repairs/:id/approve →
+- Control plane runs IExecutionProvider.swapStagingToProduction() →
+- Within 90s the new bundle is live at the same public URL.
+
+You must never directly call SandboxInstance.* from generated code. The
+runtime IS the sandbox; if you need to spawn anything, you've architected it
+wrong. Write a deterministic state machine in server.js and let the control
+plane handle the lifecycle.
+`.trim();
+
+/**
  * BUILD mode — code generation. Lifted from Dyad's BUILD_SYSTEM_PREFIX with
  * Argo-specific additions for security defaults and the operations doctrine.
  */
@@ -70,6 +130,8 @@ the chat input.
 # Argo invariants
 
 ${ARGO_INVARIANTS}
+
+${BLAXEL_SANDBOX_CONTROL}
 
 # Tag vocabulary
 

@@ -18,6 +18,7 @@ import { AgentPlan, type AgentTask } from '../components/ui/agent-plan.js';
 import { AiLoader } from '../components/ui/ai-loader.js';
 import { LiquidButton } from '../components/ui/liquid-glass-button.js';
 import { Input } from '../components/ui/input.js';
+import { PreviewPane } from '../components/PreviewPane.js';
 import { cn } from '../lib/utils.js';
 
 type BuilderState =
@@ -176,7 +177,7 @@ export function Workspace() {
       {/* ── Left: operations list ─────────────────────────────────── */}
       <aside className="border-r border-argo-border flex flex-col">
         <div className="px-4 py-4 border-b border-argo-border flex items-center justify-between">
-          <div className="text-argo-accent font-bold tracking-tight">Argo</div>
+          <div className="argo-wordmark text-2xl">Argo</div>
           <button
             type="button"
             onClick={async () => {
@@ -301,28 +302,7 @@ export function Workspace() {
               </h3>
               <AgentPlan tasks={tasks} initialExpandedIds={tasks.map((t) => t.id)} />
             </div>
-            <div className="relative bg-argo-surface/30 overflow-hidden">
-              {activeOp?.publicUrl ? (
-                <iframe
-                  title="Operation preview"
-                  src={activeOp.publicUrl}
-                  className="h-full w-full border-0"
-                  sandbox="allow-forms allow-scripts allow-same-origin"
-                />
-              ) : (
-                <div className="h-full flex items-center justify-center text-center text-argo-textSecondary px-12">
-                  <div>
-                    <div className="text-2xl text-argo-text mb-2 font-semibold">
-                      Live preview lands here
-                    </div>
-                    <div className="text-sm">
-                      Once your workflow is deployed, this pane streams its public form (Blaxel
-                      hosts it). No code is shown — Maya pastes the URL into her recruiting site.
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
+            <PreviewPane operation={activeOp} />
           </div>
 
           {/* Bottom: prompt box */}

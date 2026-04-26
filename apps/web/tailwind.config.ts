@@ -25,9 +25,31 @@ const config: Config = {
         },
       },
       fontFamily: {
-        sans: ['Geist', 'ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],
-        mono: ['"Departure Mono"', 'ui-monospace', 'SF Mono', 'monospace'],
-        display: ['Fraunces', 'ui-serif', 'serif'],
+        // Locked: Inter-500, never 400 or 600. The whole product surface uses it.
+        sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'SF Mono', 'monospace'],
+        display: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+      },
+      fontWeight: {
+        // Argo only ships one weight. Anything else is a bug.
+        normal: '500',
+        medium: '500',
+        semibold: '500',
+        bold: '500',
+      },
+      letterSpacing: {
+        argoBody: '-0.025em',
+        argoHeading: '-0.05em',
+        argoBrand: '-0.055em',
+      },
+      lineHeight: {
+        argoHero: '1.05',
+        argoBrand: '0.98',
+        argoBody: '1.55',
+      },
+      backgroundImage: {
+        // The locked wordmark gradient (Section: brand wordmark spec).
+        'argo-wordmark': 'linear-gradient(to bottom right, #0A0A0A 40%, rgba(10,10,10,0.45))',
       },
       transitionTimingFunction: {
         'argo-out': 'cubic-bezier(0.16, 1, 0.3, 1)',
