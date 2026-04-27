@@ -31,6 +31,7 @@ const Body = z.object({
       'webhook_bridge',
       'slack_bot',
       'form_workflow',
+      'multi_tenant_saas',
       'generic',
     ])
     .optional(),

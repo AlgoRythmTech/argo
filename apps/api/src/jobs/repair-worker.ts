@@ -123,13 +123,31 @@ export function startRepairWorker() {
       const smallerChange =
         priorRepairs < (Number.parseInt(process.env.REPAIR_TRUST_FORCE_SMALL_CHANGE_FIRST ?? '3', 10) ?? 3);
 
-      const failingFiles: Array<{ path: string; contents: string }> = [];
-      // For now: include the routes/* files (the most common failure surface).
-      for (const f of (bundleDoc.filesSummary ?? []) as Array<{ path: string }>) {
-        if (f.path.startsWith('routes/')) {
-          // We don't store contents in filesSummary; in v1 we re-read from execution provider's filesystem.
-          // For dev/mock the file lives on local disk under .argo/mock-deployments/<sandboxId>/.
-          failingFiles.push({ path: f.path, contents: '// (contents not loaded in v1 dev path)' });
+      // Load failing-file contents from the persisted bundle. The deploy
+      // route now stores `files: [{ path, contents, ... }]` (NOT just
+      // filesSummary), so the repair agent sees the actual code.
+      const persistedFiles = (bundleDoc.files ?? []) as Array<{
+        path: string;
+        contents: string;
+        argoGenerated: boolean;
+      }>;
+      const failingFiles: Array<{ path: string; contents: string }> = persistedFiles
+        .filter(
+          (f) =>
+            f.argoGenerated &&
+            (f.path.startsWith('routes/') || f.path.startsWith('jobs/') || f.path.startsWith('schema/')),
+        )
+        .map((f) => ({ path: f.path, contents: f.contents }));
+
+      // Fallback if a legacy bundle persisted only filesSummary.
+      if (failingFiles.length === 0) {
+        for (const f of (bundleDoc.filesSummary ?? []) as Array<{ path: string }>) {
+          if (f.path.startsWith('routes/')) {
+            failingFiles.push({
+              path: f.path,
+              contents: '// (legacy bundle — contents not persisted; please redeploy to enable repair)',
+            });
+          }
         }
       }
 

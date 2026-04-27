@@ -50,6 +50,7 @@ const config: Config = {
       backgroundImage: {
         // The locked wordmark gradient (Section: brand wordmark spec).
         'argo-wordmark': 'linear-gradient(to bottom right, #0A0A0A 40%, rgba(10,10,10,0.45))',
+        'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
       },
       transitionTimingFunction: {
         'argo-out': 'cubic-bezier(0.16, 1, 0.3, 1)',

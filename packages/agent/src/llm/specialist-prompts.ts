@@ -13,6 +13,7 @@ export type Specialist =
   | 'webhook_bridge'
   | 'slack_bot'
   | 'form_workflow' // ← the candidate-intake archetype, our v1 default
+  | 'multi_tenant_saas' // ← the hard-mode persona (OAuth + RBAC + migrations + WS)
   | 'generic';
 
 const SPEC_REST_API = `
@@ -170,6 +171,97 @@ email → digest. Battle-tested patterns:
   /readiness (200 only when the seed-templates job has completed).
 `.trim();
 
+const SPEC_MULTI_TENANT_SAAS = `
+# Specialist: multi-tenant SaaS (HARD MODE — OAuth + RBAC + migrations + realtime)
+
+You are writing a multi-tenant SaaS backend. This is the hardest persona —
+real production code with real concurrency, real auth, real schema evolution.
+Battle-tested patterns:
+
+## Tenancy
+- Every entity has \`tenantId\` (alias: organizationId / accountId). EVERY
+  query filters by tenantId in the handler. Belt-and-braces: also enforce
+  at the DB layer (Mongo: \$expr index on tenantId; Postgres: row-level
+  security policies).
+- Tenant isolation is breakable in three places: cross-tenant filter leaks
+  in shared utility functions, cache keys without tenantId prefix, and
+  WebSocket subscriptions that broadcast to the wrong room. Audit each.
+
+## Auth (OAuth + Session)
+- OAuth provider integration via @fastify/oauth2 (allow-list addition).
+  PKCE on every provider, state nonce in Redis with 10-min TTL, signed
+  redirect URI in the env (NEVER from query string — that's an open redirect).
+- Sessions: opaque sha256-hashed token in an httpOnly+secure+SameSite=lax
+  cookie. 30-day TTL with rolling renewal on every authenticated request.
+- A user can belong to multiple tenants. The active tenant is part of the
+  session payload (not the cookie — the session row in DB). /switch-tenant
+  endpoint mutates session.activeTenantId atomically.
+
+## RBAC
+- Three role tiers: owner / admin / member. Owners can manage billing +
+  invite admins. Admins can invite members. Members can read+write their
+  own data, read shared data.
+- Every protected route uses requirePermission('resource.action') middleware.
+  Permissions live in /lib/permissions.js as a static map; never compute
+  permissions in handlers.
+- A "super-admin" backdoor (env-gated) exists for support. Every super-admin
+  action writes an audit row with the support engineer's email and reason.
+
+## Schema migrations
+- Use a "migration" collection that records {version, appliedAt, sha256}.
+  On boot, compare against /migrations/*.js — apply pending in order.
+- Every migration is forward-only and idempotent. NO destructive
+  migrations in v1; mark fields deprecated and remove in a later release.
+- For Postgres: use a real migration tool (Kysely or node-pg-migrate, both
+  allow-listed). Never run raw DDL from a request handler.
+
+## Realtime (WebSockets)
+- @fastify/websocket (allow-list addition). One WS connection per
+  authenticated user; multiplex topics over the connection (don't open
+  one socket per topic).
+- Subscriptions go through a topic router. Topic format:
+  \`tenant:\${tenantId}:resource:\${resourceId}\`. The router rejects any
+  subscription for a tenantId the user doesn't belong to.
+- Broadcast through Redis pub/sub so multi-instance deploys all hear the
+  same event. Use \`@socket.io/redis-adapter\` if you go via socket.io
+  instead of @fastify/websocket.
+- Never send raw DB documents over the wire. Always project to a public
+  shape that hides internal fields (createdBy, internalFlags, etc.).
+
+## API surface
+- Versioned: /v1/* paths. Bumping to v2 happens by alias not by overwrite.
+- OpenAPI spec at /openapi.json (use the openapi-from-zod reference snippet).
+- ETag + If-Match on every mutable resource (use the optimistic-concurrency
+  reference snippet).
+- Idempotency-Key header support on every POST that creates resources
+  (use the zod-validated-route reference snippet).
+
+## Background work
+- BullMQ for queues. ALWAYS pair a queue with a DLQ (use the bullmq-job
+  reference snippet). Never let a job retry forever.
+- Long-running jobs (> 30s) write checkpoints to Redis so the repair
+  worker can detect hung jobs and the cron can resume cleanly after a
+  restart.
+
+## Observability + audit
+- Structured logging (pino). Every log line carries: tenantId, userId,
+  requestId, traceparent (W3C trace-context).
+- Audit log every mutation. The audit collection is append-only, never
+  updated, never deleted. Auditors can replay any tenant's history from it.
+- /metrics endpoint exposes Prometheus counters: requests by status,
+  job throughput, queue depth, websocket connection count.
+
+## What you MUST emit
+- src/auth/oauth.js, src/auth/session.js, src/auth/permissions.js
+- src/middleware/require-tenant.js, src/middleware/require-permission.js
+- src/migrations/index.js (the runner), src/migrations/0001_initial.js
+- src/realtime/router.js (topic-based WS multiplex)
+- src/lib/audit.js, src/lib/openapi.js
+- routes/auth.js, routes/me.js, routes/tenants.js, routes/health.js
+- jobs/scheduler.js, jobs/processor.js
+- config/permissions.json (the role-to-permission map)
+`.trim();
+
 const SPEC_GENERIC = `
 # Specialist: generic Node.js service
 
@@ -185,6 +277,7 @@ const SPECIALIST_BLOCKS: Record<Specialist, string> = {
   webhook_bridge: SPEC_WEBHOOK_BRIDGE,
   slack_bot: SPEC_SLACK_BOT,
   form_workflow: SPEC_FORM_WORKFLOW,
+  multi_tenant_saas: SPEC_MULTI_TENANT_SAAS,
   generic: SPEC_GENERIC,
 };
 
@@ -201,6 +294,14 @@ export function pickSpecialist(args: {
   const desc = args.description.toLowerCase();
   if (args.archetype === 'candidate_intake' || args.archetype === 'lead_qualification') {
     return 'form_workflow';
+  }
+  // Hard-mode wins over softer matches when the description names tenancy /
+  // OAuth / RBAC / realtime — these are the genuinely complex apps.
+  if (
+    /\b(saas|multi[- ]tenant|multitenant|workspace|organi[sz]ation|teams?)\b/.test(desc) &&
+    /\b(oauth|rbac|roles?|permissions?|websocket|realtime|invite)\b/.test(desc)
+  ) {
+    return 'multi_tenant_saas';
   }
   if (args.triggerKind === 'scheduled') return 'scheduled_job';
   if (/\bslack\b/.test(desc)) return 'slack_bot';
@@ -232,5 +333,6 @@ export const ALL_SPECIALISTS: readonly Specialist[] = [
   'webhook_bridge',
   'slack_bot',
   'form_workflow',
+  'multi_tenant_saas',
   'generic',
 ] as const;

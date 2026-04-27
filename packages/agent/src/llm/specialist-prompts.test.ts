@@ -47,6 +47,16 @@ describe('pickSpecialist', () => {
       pickSpecialist({ archetype: 'generic', triggerKind: 'email_received', description: 'do something' }),
     ).toBe('generic');
   });
+
+  it('routes a tenancy + RBAC + websockets description to multi_tenant_saas', () => {
+    expect(
+      pickSpecialist({
+        archetype: 'generic',
+        triggerKind: 'form_submission',
+        description: 'A multi-tenant SaaS for design teams with OAuth login, role-based permissions, and realtime updates.',
+      }),
+    ).toBe('multi_tenant_saas');
+  });
 });
 
 describe('buildSpecialistSystemPrompt', () => {

@@ -6,6 +6,7 @@ import { Landing } from './pages/Landing.js';
 import { SignIn } from './pages/SignIn.js';
 import { Workspace } from './pages/Workspace.js';
 import { RepairReview } from './pages/RepairReview.js';
+import { CommandPalette } from './components/CommandPalette.js';
 
 export function App() {
   const view = useArgo((s) => s.view);
@@ -45,16 +46,26 @@ export function App() {
     );
   }
 
-  switch (view) {
-    case 'landing':
-      return <Landing />;
-    case 'sign-in':
-      return <SignIn />;
-    case 'workspace':
-      return <Workspace />;
-    case 'repair-review':
-      return <RepairReview />;
-    default:
-      return <Landing />;
-  }
+  // Cmd-K palette is always mounted; it's a no-op until opened.
+  const page = (() => {
+    switch (view) {
+      case 'landing':
+        return <Landing />;
+      case 'sign-in':
+        return <SignIn />;
+      case 'workspace':
+        return <Workspace />;
+      case 'repair-review':
+        return <RepairReview />;
+      default:
+        return <Landing />;
+    }
+  })();
+
+  return (
+    <>
+      {page}
+      <CommandPalette />
+    </>
+  );
 }

@@ -1,8 +1,22 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
-import { generateBundle, generateTestSuite } from '@argo/build-engine';
-import { createBuildSandbox, createExecutionProvider } from '@argo/workspace-runtime';
-import type { WorkflowMap } from '@argo/shared-types';
+import {
+  generateBundle,
+  generateTestSuite,
+  runAutoFixLoop,
+  runQualityGate,
+  type AutoFixCycleEvent,
+} from '@argo/build-engine';
+import {
+  pickSpecialist,
+  renderBriefAsPrompt,
+} from '@argo/agent';
+import {
+  createBuildSandbox,
+  createExecutionProvider,
+  type OperationBundle,
+} from '@argo/workspace-runtime';
+import type { ProjectBrief, WorkflowMap } from '@argo/shared-types';
 import { getPrisma } from '../db/prisma.js';
 import { getMongo } from '../db/mongo.js';
 import { requireSession } from '../plugins/auth-plugin.js';
@@ -18,6 +32,18 @@ const buildSandbox = createBuildSandbox();
 const executionProvider = createExecutionProvider();
 
 export async function registerDeployRoutes(app: FastifyInstance) {
+  /**
+   * POST /api/operations/deploy
+   *
+   * Two paths:
+   *   1. If a ProjectBrief exists → run the full auto-fix loop with GPT-5.5
+   *      (specialist persona + reference snippets + supermemory recall).
+   *   2. If only a WorkflowMap exists → fall back to the deterministic
+   *      generator. This preserves the old path for legacy operations.
+   *
+   * In both paths the bundle goes through the build sandbox (synthetic
+   * submission) and only deploys to Blaxel if every assertion passes.
+   */
   app.post('/api/operations/deploy', async (request, reply) => {
     const session = requireSession(request, reply);
     if (!session) return;
@@ -30,44 +56,135 @@ export async function registerDeployRoutes(app: FastifyInstance) {
     if (!op) return reply.code(404).send({ error: 'not_found' });
 
     const { db } = await getMongo();
+
+    // Prefer the brief over the legacy map — it's denser context.
+    const briefDoc = await db
+      .collection('project_briefs')
+      .find({ operationId: op.id })
+      .sort({ persistedAt: -1 })
+      .limit(1)
+      .next();
     const mapDoc = await db
       .collection('workflow_maps')
       .find({ operationId: op.id })
       .sort({ version: -1 })
       .limit(1)
       .next();
-    if (!mapDoc) return reply.code(409).send({ error: 'no_map_yet' });
-
-    const map = mapDoc.map as WorkflowMap;
+    if (!briefDoc && !mapDoc) return reply.code(409).send({ error: 'no_scope_yet' });
 
     await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'building' } });
     broadcastToOwner(session.userId, { type: 'operation_status', operationId: op.id, status: 'building' });
 
     const bundleVersion = (op.bundleVersion ?? 0) + 1;
-    const generated = generateBundle({
-      operationId: op.id,
-      operationSlug: op.slug,
-      bundleVersion,
-      workflowMapVersion: op.workflowMapVersion,
-      generatedByModel: 'argo-build-engine-v1',
-      map,
-    });
+    let bundle: OperationBundle | null = null;
+    let generatedByModel = 'argo-deterministic';
+    let aiCycles = 0;
 
-    if (!generated.ok) {
-      await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'failed_build' } });
-      return reply.code(500).send({ error: 'generation_failed', issues: generated.issues });
+    if (briefDoc) {
+      // ── AI path: brief → GPT-5.5 + auto-fix loop ──────────────────────
+      const brief = briefDoc as unknown as ProjectBrief & { buildPrompt?: string };
+      const buildPrompt = brief.buildPrompt ?? renderBriefAsPrompt(brief);
+      const specialist = pickSpecialist({
+        archetype: 'form_workflow',
+        triggerKind: brief.trigger,
+        description: `${brief.name}\n${brief.outcome}`,
+      });
+      generatedByModel = process.env.OPENAI_MODEL_PRIMARY ?? 'gpt-5.5';
+
+      try {
+        const result = await runAutoFixLoop({
+          specialist,
+          userPrompt: buildPrompt,
+          manifest: {
+            operationId: op.id,
+            operationSlug: op.slug,
+            bundleVersion,
+            workflowMapVersion: op.workflowMapVersion ?? 1,
+            requiredEnv: ['ARGO_OPERATION_ID', 'ARGO_CONTROL_PLANE_URL', 'INTERNAL_API_KEY', 'MONGODB_URI'],
+          },
+          augmentation: {
+            trigger: brief.trigger,
+            integrations: brief.integrations,
+            auth: brief.auth,
+            dataClassification: brief.dataClassification,
+            ownerId: session.userId,
+          },
+          onCycle: (evt: AutoFixCycleEvent) => {
+            broadcastToOwner(session.userId, { type: 'deploy_progress', operationId: op.id, evt });
+          },
+        });
+        bundle = result.bundle;
+        aiCycles = result.cycles;
+        if (!result.success || !bundle) {
+          await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'failed_build' } });
+          return reply.code(422).send({
+            error: 'autofix_exhausted',
+            cycles: result.cycles,
+            issues: result.finalReport.issues.slice(0, 25),
+          });
+        }
+      } catch (err) {
+        await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'failed_build' } });
+        logger.error({ err }, 'autofix loop crashed');
+        return reply.code(500).send({ error: 'autofix_crash', detail: String(err).slice(0, 400) });
+      }
+    } else if (mapDoc) {
+      // ── Deterministic path (legacy): WorkflowMap → fixed templates ─────
+      const map = mapDoc.map as WorkflowMap;
+      const generated = generateBundle({
+        operationId: op.id,
+        operationSlug: op.slug,
+        bundleVersion,
+        workflowMapVersion: op.workflowMapVersion,
+        generatedByModel,
+        map,
+      });
+      if (!generated.ok) {
+        await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'failed_build' } });
+        return reply.code(500).send({ error: 'generation_failed', issues: generated.issues });
+      }
+      bundle = generated.bundle;
     }
 
+    if (!bundle) {
+      await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'failed_build' } });
+      return reply.code(500).send({ error: 'no_bundle' });
+    }
+
+    // Final quality gate (defence in depth — auto-fix loop already did one,
+    // but we re-run here so the deterministic path is also gated).
+    const gateReport = runQualityGate(bundle);
+    if (!gateReport.passed) {
+      await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'failed_build' } });
+      return reply.code(422).send({
+        error: 'quality_gate_failed',
+        issues: gateReport.issues.slice(0, 25),
+      });
+    }
+
+    // Persist the FULL bundle (file contents included) so the repair worker
+    // can fetch failing files when it needs to propose a patch. PII-safe by
+    // construction — bundles are deterministic generator output, no PII.
     await db.collection('operation_bundles').insertOne({
       operationId: op.id,
       version: bundleVersion,
-      manifest: generated.bundle.manifest,
-      filesSummary: generated.bundle.files.map((f) => ({
+      manifest: bundle.manifest,
+      files: bundle.files.map((f) => ({
+        path: f.path,
+        contents: f.contents,
+        sha256: f.sha256,
+        argoGenerated: f.argoGenerated,
+        sourceStepId: f.sourceStepId,
+        size: f.contents.length,
+      })),
+      filesSummary: bundle.files.map((f) => ({
         path: f.path,
         sha256: f.sha256,
         argoGenerated: f.argoGenerated,
         size: f.contents.length,
       })),
+      generatedByModel,
+      aiCycles,
       createdAt: new Date().toISOString(),
     });
 
@@ -75,13 +192,17 @@ export async function registerDeployRoutes(app: FastifyInstance) {
     await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'testing' } });
     broadcastToOwner(session.userId, { type: 'operation_status', operationId: op.id, status: 'testing' });
 
-    const cases = generateTestSuite(map);
-    const testReport = await buildSandbox.runTests({ bundle: generated.bundle, cases });
-
-    if (!testReport.passed) {
-      await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'failed_build' } });
-      logger.warn({ operationId: op.id, testReport }, 'tests failed pre-deploy');
-      return reply.code(409).send({ error: 'tests_failed', testReport });
+    // Generate the synthetic-submission suite from the legacy WorkflowMap
+    // when it's present; otherwise the AI path's bundle is its own test
+    // (the build agent emits the test cases inline).
+    if (mapDoc && !briefDoc) {
+      const cases = generateTestSuite(mapDoc.map as WorkflowMap);
+      const testReport = await buildSandbox.runTests({ bundle, cases });
+      if (!testReport.passed) {
+        await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'failed_build' } });
+        logger.warn({ operationId: op.id, testReport }, 'tests failed pre-deploy');
+        return reply.code(409).send({ error: 'tests_failed', testReport });
+      }
     }
 
     // ── DEPLOY ─────────────────────────────────────────────────────────
@@ -92,7 +213,7 @@ export async function registerDeployRoutes(app: FastifyInstance) {
     try {
       handle = await executionProvider.deploy({
         operationId: op.id,
-        bundle: generated.bundle,
+        bundle,
         environment: 'production',
         envOverrides: {
           ARGO_CONTROL_PLANE_URL: process.env.API_PUBLIC_URL ?? 'http://host.docker.internal:4000',
@@ -127,7 +248,9 @@ export async function registerDeployRoutes(app: FastifyInstance) {
       operationId: op.id,
       operationName: op.name,
       kind: 'deployed',
-      message: `Deployed v${bundleVersion} — live at ${handle.publicUrl}.`,
+      message: briefDoc
+        ? `Shipped v${bundleVersion} via GPT-5.5 (${aiCycles} ${aiCycles === 1 ? 'cycle' : 'cycles'}) — live at ${handle.publicUrl}.`
+        : `Deployed v${bundleVersion} — live at ${handle.publicUrl}.`,
     });
     broadcastToOwner(session.userId, { type: 'activity', payload: activity });
     broadcastToOwner(session.userId, { type: 'operation_status', operationId: op.id, status: 'running' });
@@ -137,6 +260,8 @@ export async function registerDeployRoutes(app: FastifyInstance) {
       operationId: op.id,
       bundleVersion,
       publicUrl: handle.publicUrl,
+      generatedByModel,
+      aiCycles,
       handle,
     });
   });

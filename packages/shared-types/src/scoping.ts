@@ -80,6 +80,7 @@ export const ScopingQuestionnaire = z.object({
     'webhook_bridge',
     'slack_bot',
     'form_workflow',
+    'multi_tenant_saas',
     'generic',
   ]),
   questions: z.array(ScopingQuestion).min(3).max(8),
