@@ -231,6 +231,30 @@ export const operations = {
       argoGenerated: boolean;
       bytes: number;
     }>(`/api/operations/${id}/files/contents?path=${encodeURIComponent(path)}`),
+  searchBundle: (id: string, q: string, caseSensitive = false) => {
+    const qs = new URLSearchParams({ q });
+    if (caseSensitive) qs.set('caseSensitive', 'true');
+    return api.get<{
+      operationId: string;
+      bundleVersion: number | null;
+      query: string;
+      caseSensitive: boolean;
+      matchCount: number;
+      fileCount: number;
+      truncated: boolean;
+      files: Array<{
+        path: string;
+        argoGenerated: boolean;
+        truncated: boolean;
+        matches: Array<{
+          line: number;
+          text: string;
+          before: string | null;
+          after: string | null;
+        }>;
+      }>;
+    }>(`/api/operations/${id}/files/search?${qs.toString()}`);
+  },
   previewAction: (id: string, action: PreviewAction) =>
     api.post<{ ok: true; action: PreviewAction }>(`/api/operations/${id}/preview-action`, {
       action,

@@ -21,11 +21,27 @@ import {
   FileCode2,
   Folder,
   Loader2,
+  Search,
   ShieldAlert,
   ShieldCheck,
+  X,
 } from 'lucide-react';
 import { operations, type GeneratedBundle, type GeneratedFileSummary } from '../api/client.js';
 import { cn } from '../lib/utils.js';
+
+interface SearchHit {
+  path: string;
+  argoGenerated: boolean;
+  truncated: boolean;
+  matches: Array<{ line: number; text: string; before: string | null; after: string | null }>;
+}
+interface SearchResult {
+  query: string;
+  matchCount: number;
+  fileCount: number;
+  truncated: boolean;
+  files: SearchHit[];
+}
 
 interface CodeViewerProps {
   operationId: string;
@@ -48,6 +64,56 @@ export function CodeViewer({ operationId, bundle }: CodeViewerProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [searchInput, setSearchInput] = useState('');
+  const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  // Debounced bundle search. The endpoint is server-side grep across
+  // every file in the latest bundle — auditor-grade "where do we
+  // touch credit cards" without downloading the bundle.
+  useEffect(() => {
+    const q = searchInput.trim();
+    if (q.length < 2) {
+      setSearchResult(null);
+      setSearchError(null);
+      setSearchLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setSearchLoading(true);
+    setSearchError(null);
+    const handle = setTimeout(() => {
+      operations
+        .searchBundle(operationId, q)
+        .then((res) => {
+          if (cancelled) return;
+          setSearchResult({
+            query: res.query,
+            matchCount: res.matchCount,
+            fileCount: res.fileCount,
+            truncated: res.truncated,
+            files: res.files,
+          });
+          setSearchLoading(false);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          const msg = String(err?.message ?? err);
+          setSearchError(msg.includes('legacy_bundle') ? 'Redeploy this operation to enable search.' : msg.slice(0, 200));
+          setSearchLoading(false);
+        });
+    }, 220);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [operationId, searchInput]);
+
+  const jumpToHit = (path: string) => {
+    setActivePath(path);
+    // Keep the search query so the user sees the highlight; clear input only on Esc.
+  };
 
   useEffect(() => {
     if (!activePath) return;
@@ -97,11 +163,40 @@ export function CodeViewer({ operationId, bundle }: CodeViewerProps) {
     }
   };
 
+  const searchActive = searchInput.trim().length >= 2;
+
   return (
     <div className="h-full flex bg-argo-bg overflow-hidden">
-      {/* File tree */}
-      <aside className="w-64 flex-shrink-0 border-r border-argo-border overflow-y-auto py-2">
-        <FileTree node={tree} depth={0} activePath={activePath} onSelect={setActivePath} />
+      {/* File tree column */}
+      <aside className="w-64 flex-shrink-0 border-r border-argo-border flex flex-col">
+        <div className="p-2 border-b border-argo-border/60">
+          <div className="flex items-center gap-1.5 bg-argo-surface rounded px-2 h-7">
+            <Search className="h-3 w-3 text-argo-textSecondary flex-shrink-0" />
+            <input
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setSearchInput('');
+              }}
+              placeholder="Search bundle…"
+              className="flex-1 min-w-0 bg-transparent text-xs text-argo-text placeholder:text-argo-textSecondary focus:outline-none font-mono"
+            />
+            {searchInput && (
+              <button
+                type="button"
+                onClick={() => setSearchInput('')}
+                title="Clear search (Esc)"
+                aria-label="Clear search"
+                className="text-argo-textSecondary hover:text-argo-text flex-shrink-0"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto py-2">
+          <FileTree node={tree} depth={0} activePath={activePath} onSelect={setActivePath} />
+        </div>
       </aside>
 
       {/* Code pane */}
@@ -168,7 +263,16 @@ export function CodeViewer({ operationId, bundle }: CodeViewerProps) {
         </header>
 
         <div className="flex-1 overflow-auto bg-[#0a0a0b] font-mono text-[12px] leading-[1.6]">
-          {loading ? (
+          {searchActive ? (
+            <SearchResultsPanel
+              query={searchInput.trim()}
+              loading={searchLoading}
+              error={searchError}
+              result={searchResult}
+              onJump={jumpToHit}
+              activePath={activePath}
+            />
+          ) : loading ? (
             <div className="h-full flex items-center justify-center text-argo-textSecondary">
               <Loader2 className="h-4 w-4 animate-spin mr-2" /> Loading…
             </div>
@@ -283,6 +387,129 @@ function FileTree({
       )}
     </button>
   );
+}
+
+function SearchResultsPanel({
+  query,
+  loading,
+  error,
+  result,
+  onJump,
+  activePath,
+}: {
+  query: string;
+  loading: boolean;
+  error: string | null;
+  result: SearchResult | null;
+  onJump: (path: string) => void;
+  activePath: string | null;
+}) {
+  if (loading && !result) {
+    return (
+      <div className="h-full flex items-center justify-center text-argo-textSecondary text-xs">
+        <Loader2 className="h-4 w-4 animate-spin mr-2" /> Searching for{' '}
+        <span className="text-argo-text mx-1">"{query}"</span>…
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="h-full flex items-center justify-center text-argo-amber text-xs px-6 text-center">
+        {error}
+      </div>
+    );
+  }
+  if (!result) return null;
+  if (result.fileCount === 0) {
+    return (
+      <div className="h-full flex items-center justify-center text-argo-textSecondary text-xs px-6 text-center">
+        No matches for <span className="text-argo-text mx-1">"{query}"</span> in this bundle.
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-2 py-3 text-argo-text">
+      <div className="px-2 mb-3 text-[11px] uppercase tracking-widest text-argo-textSecondary">
+        {result.matchCount} match{result.matchCount === 1 ? '' : 'es'} in {result.fileCount} file
+        {result.fileCount === 1 ? '' : 's'}
+        {result.truncated && (
+          <span className="ml-2 text-argo-amber normal-case tracking-normal">
+            (results truncated — narrow the query)
+          </span>
+        )}
+      </div>
+      <ul className="space-y-3">
+        {result.files.map((f) => (
+          <li key={f.path} className="border border-argo-border/60 rounded-md overflow-hidden">
+            <button
+              type="button"
+              onClick={() => onJump(f.path)}
+              className={cn(
+                'w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-argo-surface/40 border-b border-argo-border/40',
+                activePath === f.path && 'bg-argo-accent/10',
+              )}
+            >
+              <FileCode2 className="h-3 w-3 text-argo-textSecondary flex-shrink-0" />
+              <span className="text-xs text-argo-text font-mono truncate">{f.path}</span>
+              <span className="text-[10px] text-argo-textSecondary font-mono ml-auto flex-shrink-0">
+                {f.matches.length} match{f.matches.length === 1 ? '' : 'es'}
+              </span>
+              {f.argoGenerated && (
+                <span className="text-[8px] uppercase text-argo-accent/70 flex-shrink-0">gen</span>
+              )}
+            </button>
+            <div className="bg-[#08090b]">
+              {f.matches.map((m, i) => (
+                <div
+                  key={`${f.path}-${m.line}-${i}`}
+                  className="px-3 py-1.5 border-b border-argo-border/30 last:border-b-0 text-[11px] leading-[1.5]"
+                >
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-argo-textSecondary/60 font-mono text-[10px] w-10 text-right flex-shrink-0">
+                      {m.line}
+                    </span>
+                    <span className="text-argo-text font-mono whitespace-pre overflow-hidden">
+                      {renderHighlight(m.text, query)}
+                    </span>
+                  </div>
+                  {(m.before || m.after) && (
+                    <div className="ml-12 mt-0.5 text-argo-textSecondary/70 font-mono text-[10px] whitespace-pre overflow-hidden">
+                      {m.before && <div className="opacity-60">{m.before}</div>}
+                      {m.after && <div className="opacity-60">{m.after}</div>}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function renderHighlight(text: string, query: string): React.ReactNode {
+  if (!query) return text;
+  const ql = query.toLowerCase();
+  const tl = text.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let i = 0;
+  let from = 0;
+  while ((i = tl.indexOf(ql, from)) !== -1) {
+    if (i > from) parts.push(text.slice(from, i));
+    parts.push(
+      <mark
+        key={`${i}-${from}`}
+        className="bg-argo-accent/25 text-argo-accent rounded-sm px-0.5"
+      >
+        {text.slice(i, i + query.length)}
+      </mark>,
+    );
+    from = i + query.length;
+  }
+  if (from < text.length) parts.push(text.slice(from));
+  return parts;
 }
 
 // ── helpers ────────────────────────────────────────────────────────────

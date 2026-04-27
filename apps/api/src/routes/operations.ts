@@ -408,6 +408,107 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
   });
 
   /**
+   * GET /api/operations/:id/files/search?q=…&caseSensitive=true|false
+   *
+   * Server-side grep across every file in the latest bundle. Returns
+   * up to 200 matches across up to 50 files. Each match carries the
+   * 1-indexed line number, the matching line text (truncated to 240
+   * chars), and a small snippet of context (1 line above + below).
+   *
+   * The auditor surface — operators rarely use it, but inspectors and
+   * security reviewers always want a way to grep "where do we touch
+   * credit cards" or "where is escapeForEmail called" without having
+   * to download the bundle.
+   */
+  app.get('/api/operations/:id/files/search', async (request, reply) => {
+    const session = requireSession(request, reply);
+    if (!session) return;
+    const id = String((request.params as { id: string }).id);
+    const q = String((request.query as { q?: string }).q ?? '').trim();
+    const caseSensitive =
+      String((request.query as { caseSensitive?: string }).caseSensitive ?? 'false').toLowerCase() ===
+      'true';
+    if (q.length < 2) return reply.code(400).send({ error: 'query_too_short' });
+    if (q.length > 200) return reply.code(400).send({ error: 'query_too_long' });
+
+    const op = await getPrisma().operation.findFirst({ where: { id, ownerId: session.userId } });
+    if (!op) return reply.code(404).send({ error: 'not_found' });
+
+    const { db } = await getMongo();
+    const bundle = await db
+      .collection('operation_bundles')
+      .find({ operationId: op.id })
+      .sort({ version: -1 })
+      .limit(1)
+      .next();
+    if (!bundle) return reply.code(404).send({ error: 'no_bundle_yet' });
+
+    const files =
+      ((bundle as { files?: Array<{ path: string; contents: string; argoGenerated: boolean }> }).files ?? []);
+    if (files.length === 0) {
+      return reply.code(409).send({
+        error: 'legacy_bundle_no_contents',
+        message: 'This bundle was generated before per-file persistence. Redeploy to enable search.',
+      });
+    }
+
+    const needle = caseSensitive ? q : q.toLowerCase();
+    const MAX_MATCHES = 200;
+    const MAX_FILES = 50;
+    const MAX_LINE_CHARS = 240;
+    type Match = { line: number; text: string; before: string | null; after: string | null };
+    const fileResults: Array<{ path: string; argoGenerated: boolean; matches: Match[]; truncated: boolean }> = [];
+    let total = 0;
+    let truncated = false;
+
+    for (const f of files) {
+      if (fileResults.length >= MAX_FILES) {
+        truncated = true;
+        break;
+      }
+      const lines = f.contents.split('\n');
+      const matches: Match[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const raw = lines[i] ?? '';
+        const haystack = caseSensitive ? raw : raw.toLowerCase();
+        if (haystack.includes(needle)) {
+          matches.push({
+            line: i + 1,
+            text: raw.length > MAX_LINE_CHARS ? raw.slice(0, MAX_LINE_CHARS) + '…' : raw,
+            before: i > 0 ? (lines[i - 1] ?? '').slice(0, MAX_LINE_CHARS) : null,
+            after: i < lines.length - 1 ? (lines[i + 1] ?? '').slice(0, MAX_LINE_CHARS) : null,
+          });
+          total++;
+          if (total >= MAX_MATCHES) {
+            truncated = true;
+            break;
+          }
+        }
+      }
+      if (matches.length > 0) {
+        fileResults.push({
+          path: f.path,
+          argoGenerated: f.argoGenerated,
+          matches,
+          truncated: false,
+        });
+      }
+      if (truncated) break;
+    }
+
+    return reply.send({
+      operationId: op.id,
+      bundleVersion: (bundle as { version?: number }).version ?? null,
+      query: q,
+      caseSensitive,
+      matchCount: total,
+      fileCount: fileResults.length,
+      truncated,
+      files: fileResults,
+    });
+  });
+
+  /**
    * POST /api/operations/:id/preview-action — the three live-preview controls.
    * refresh = no-op on backend (client bumps the iframe key).
    * restart = restart the running process inside the existing sandbox.
