@@ -24,6 +24,7 @@ import { BuildStream } from '../components/BuildStream.js';
 import { SpendBadge } from '../components/SpendBadge.js';
 import { OperationReadmeButton } from '../components/OperationReadmeButton.js';
 import { HealthBadge } from '../components/HealthBadge.js';
+import { WorkspaceEmptyState } from '../components/WorkspaceEmptyState.js';
 import { cn } from '../lib/utils.js';
 
 type BuilderState =
@@ -323,6 +324,11 @@ export function Workspace() {
               <ScopingPanel
                 operationId={activeOp.id}
                 onBriefReady={(prompt) => setActiveBuildPrompt(prompt)}
+              />
+            ) : !activeOp && ops.length === 0 ? (
+              <WorkspaceEmptyState
+                {...(me?.email ? { firstName: me.email.split('@')[0] } : {})}
+                onPickExample={(sentence) => void sendPrompt(sentence, [], 'default')}
               />
             ) : (
               <PreviewPane operation={activeOp} />
