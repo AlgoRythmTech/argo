@@ -15,12 +15,16 @@ import {
   CircleDollarSign,
   CircleDotDashed,
   CircleX,
+  Compass,
   FileCode2,
   Hash,
   Loader2,
   Package,
+  PlayCircle,
+  ScrollText,
   ShieldCheck,
   Sparkles,
+  Terminal,
   Wrench,
 } from 'lucide-react';
 import { cn } from '../lib/utils.js';
@@ -63,6 +67,69 @@ interface CycleState {
   issues: QualityIssue[];
 }
 
+interface ArchitectPlanFile {
+  path: string;
+  size: 'small' | 'medium' | 'large';
+  rationale: string;
+}
+
+interface ArchitectPlan {
+  title: string;
+  summary: string;
+  files: ArchitectPlanFile[];
+  fileCount: number;
+  dependencyCount: number;
+  mermaid: string;
+}
+
+interface ReviewerFinding {
+  severity: 'bad' | 'warn' | 'info';
+  category: string;
+  file: string | null;
+  message: string;
+}
+
+interface ReviewerReport {
+  cycle: number;
+  passed: boolean;
+  summary: string;
+  findings: ReviewerFinding[];
+}
+
+interface TestingFailureLite {
+  kind: string;
+  message?: string;
+  route?: string;
+  status?: number;
+  bodySnippet?: string;
+  importPath?: string;
+  sourceFile?: string;
+  reason?: string;
+  path?: string;
+  tail?: string;
+  name?: string;
+  criterion?: string;
+  assertion?: string;
+  detail?: string;
+}
+
+interface TestingReportLite {
+  cycle: number;
+  passed: boolean;
+  booted: boolean;
+  durationMs: number;
+  routesExercised: string[];
+  failures: TestingFailureLite[];
+}
+
+interface ToolEventLite {
+  ts: number;
+  phase: 'called' | 'completed';
+  name: string;
+  ok?: boolean;
+  label?: string;
+}
+
 export interface BuildStreamProps {
   operationId: string;
   prompt: string;
@@ -82,6 +149,11 @@ export function BuildStream({ operationId, prompt, onComplete }: BuildStreamProp
   const [tokens, setTokens] = useState<{ total: number; usd: number } | null>(null);
   const [startedAt] = useState<number>(() => Date.now());
   const [now, setNow] = useState<number>(() => Date.now());
+  const [architectPhase, setArchitectPhase] = useState<'idle' | 'started' | 'completed'>('idle');
+  const [architectPlan, setArchitectPlan] = useState<ArchitectPlan | null>(null);
+  const [reviewerByCycle, setReviewerByCycle] = useState<Map<number, ReviewerReport>>(new Map());
+  const [testingByCycle, setTestingByCycle] = useState<Map<number, TestingReportLite>>(new Map());
+  const [toolEvents, setToolEvents] = useState<ToolEventLite[]>([]);
   const filesRef = useRef(files);
   filesRef.current = files;
 
@@ -226,6 +298,47 @@ export function BuildStream({ operationId, prompt, onComplete }: BuildStreamProp
     } else if (event === 'token_tick') {
       const p = payload as { totalTokens: number; estimatedUsd: number };
       setTokens({ total: p.totalTokens, usd: p.estimatedUsd });
+    } else if (event === 'architect') {
+      const p = payload as Partial<ArchitectPlan> & { phase: 'started' | 'completed' };
+      if (p.phase === 'started') {
+        setArchitectPhase('started');
+      } else if (p.phase === 'completed') {
+        setArchitectPhase('completed');
+        setArchitectPlan({
+          title: p.title ?? '',
+          summary: p.summary ?? '',
+          files: (p.files ?? []) as ArchitectPlanFile[],
+          fileCount: p.fileCount ?? 0,
+          dependencyCount: p.dependencyCount ?? 0,
+          mermaid: p.mermaid ?? '',
+        });
+      }
+    } else if (event === 'reviewer') {
+      const p = payload as ReviewerReport;
+      setReviewerByCycle((prev) => {
+        const next = new Map(prev);
+        next.set(p.cycle, p);
+        return next;
+      });
+    } else if (event === 'testing') {
+      const p = payload as TestingReportLite;
+      setTestingByCycle((prev) => {
+        const next = new Map(prev);
+        next.set(p.cycle, p);
+        return next;
+      });
+    } else if (event === 'tool') {
+      const p = payload as { kind: 'tool_called' | 'tool_completed'; name: string; ok?: boolean; label?: string };
+      setToolEvents((prev) => [
+        ...prev.slice(-30),
+        {
+          ts: Date.now(),
+          phase: p.kind === 'tool_called' ? 'called' : 'completed',
+          name: p.name,
+          ...(p.ok !== undefined ? { ok: p.ok } : {}),
+          ...(p.label ? { label: p.label } : {}),
+        },
+      ]);
     } else if (event === 'done') {
       const p = payload as { success: boolean };
       setDone({ success: p.success, cycles: cycles.length || activeCycle || 1 });
@@ -280,6 +393,31 @@ export function BuildStream({ operationId, prompt, onComplete }: BuildStreamProp
             WHY a re-prompt is happening so the operator sees Argo's
             quality loop in action instead of "another spinner". */}
         <AutoFixNarrative cycles={cycles} activeCycle={activeCycle} streaming={streaming} />
+
+        {/* Architect plan card — multi-agent mode only. Shows the plan
+            BEFORE the builder starts, so the operator sees what Argo
+            committed to ship. Cursor-2.0 / Replit-Agent style "plan
+            mode" view. None of the other vibe coders surface this. */}
+        {(architectPhase !== 'idle') && (
+          <ArchitectCard phase={architectPhase} plan={architectPlan} />
+        )}
+
+        {/* Tool-call strip — every <argo-tool> the agent fires lights up
+            here. Especially noisy on fullstack_app builds with sandbox_exec. */}
+        {toolEvents.length > 0 && <ToolEventStrip events={toolEvents} />}
+
+        {/* Per-cycle reviewer + testing reports rendered below the cycle row */}
+        {cycles.map((c) => {
+          const review = reviewerByCycle.get(c.cycle);
+          const testing = testingByCycle.get(c.cycle);
+          if (!review && !testing) return null;
+          return (
+            <div key={`reports-${c.cycle}`} className="space-y-3">
+              {testing && <TestingCard cycle={c.cycle} report={testing} />}
+              {review && <ReviewerCard cycle={c.cycle} report={review} />}
+            </div>
+          );
+        })}
 
         {/* Files appearing */}
         {files.size > 0 && (
@@ -490,6 +628,297 @@ function AutoFixNarrative({
         </div>
       </div>
     </motion.div>
+  );
+}
+
+function ArchitectCard({
+  phase,
+  plan,
+}: {
+  phase: 'idle' | 'started' | 'completed';
+  plan: ArchitectPlan | null;
+}) {
+  if (phase === 'started' && !plan) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: -4 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.2 }}
+        className="rounded-lg border border-argo-accent/30 bg-argo-accent/5 px-3 py-2.5 flex items-center gap-2.5"
+      >
+        <Loader2 className="h-3.5 w-3.5 text-argo-accent animate-spin flex-shrink-0" />
+        <div className="text-sm text-argo-text argo-body">
+          <span className="text-argo-accent font-medium">Architect agent · planning.</span>{' '}
+          Reading the brief, deciding the file structure, drafting the architecture diagram. The
+          builder won't start until the plan is locked.
+        </div>
+      </motion.div>
+    );
+  }
+  if (!plan) return null;
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+      className="rounded-lg border border-argo-accent/30 bg-argo-accent/5 overflow-hidden"
+    >
+      <div className="px-3.5 py-2.5 border-b border-argo-accent/20 flex items-start gap-2.5">
+        <Compass className="h-3.5 w-3.5 text-argo-accent mt-0.5 flex-shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="text-sm text-argo-text">
+            <span className="text-argo-accent font-medium">Architect plan</span>{' '}
+            <span className="text-argo-textSecondary">
+              · {plan.fileCount} files · {plan.dependencyCount} deps
+            </span>
+          </div>
+          <div className="text-base text-argo-text mt-1" style={{ letterSpacing: '-0.02em' }}>
+            {plan.title}
+          </div>
+          <p className="text-xs text-argo-textSecondary argo-body mt-1 leading-relaxed">
+            {plan.summary}
+          </p>
+        </div>
+      </div>
+      {plan.files.length > 0 && (
+        <details className="px-3.5 py-2 border-b border-argo-accent/10">
+          <summary className="text-[11px] uppercase tracking-widest text-argo-textSecondary font-mono cursor-pointer hover:text-argo-text">
+            File plan ({plan.files.length})
+          </summary>
+          <ul className="mt-2 space-y-1 max-h-64 overflow-y-auto">
+            {plan.files.map((f) => (
+              <li key={f.path} className="flex items-start gap-2 text-xs">
+                <span
+                  className={cn(
+                    'inline-block h-1.5 w-1.5 rounded-full mt-1.5 flex-shrink-0',
+                    f.size === 'large'
+                      ? 'bg-argo-accent'
+                      : f.size === 'medium'
+                      ? 'bg-argo-accent/60'
+                      : 'bg-argo-accent/30',
+                  )}
+                />
+                <div className="min-w-0">
+                  <span className="font-mono text-argo-text">{f.path}</span>
+                  <span className="text-argo-textSecondary text-[11px] ml-2">— {f.rationale}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {plan.mermaid && (
+        <details className="px-3.5 py-2">
+          <summary className="text-[11px] uppercase tracking-widest text-argo-textSecondary font-mono cursor-pointer hover:text-argo-text">
+            Architecture diagram (mermaid source)
+          </summary>
+          <pre className="mt-2 text-[10px] font-mono text-argo-textSecondary bg-argo-bg/40 border border-argo-border/40 rounded p-2 overflow-x-auto">
+            {plan.mermaid}
+          </pre>
+        </details>
+      )}
+    </motion.div>
+  );
+}
+
+function ReviewerCard({ cycle, report }: { cycle: number; report: ReviewerReport }) {
+  const bad = report.findings.filter((f) => f.severity === 'bad');
+  const warn = report.findings.filter((f) => f.severity === 'warn');
+  const tone = report.passed
+    ? 'border-argo-green/30 bg-argo-green/5'
+    : 'border-argo-amber/40 bg-argo-amber/5';
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      className={cn('rounded-lg border px-3.5 py-2.5', tone)}
+    >
+      <div className="flex items-start gap-2.5">
+        <ScrollText
+          className={cn(
+            'h-3.5 w-3.5 mt-0.5 flex-shrink-0',
+            report.passed ? 'text-argo-green' : 'text-argo-amber',
+          )}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="text-sm text-argo-text">
+            <span
+              className={cn('font-medium', report.passed ? 'text-argo-green' : 'text-argo-amber')}
+            >
+              Reviewer · cycle {cycle} · {report.passed ? 'approved' : 'sending back for fixes'}.
+            </span>
+          </div>
+          <p className="text-xs text-argo-textSecondary argo-body mt-1 leading-relaxed">
+            {report.summary}
+          </p>
+          {(bad.length > 0 || warn.length > 0) && (
+            <ul className="mt-2 space-y-1">
+              {bad.map((f, i) => (
+                <li
+                  key={`bad-${i}`}
+                  className="flex items-start gap-2 text-xs font-mono text-argo-amber"
+                >
+                  <CircleAlert className="h-3 w-3 mt-0.5 flex-shrink-0" />
+                  <span>
+                    <span className="text-argo-amber">[{f.category}]</span>{' '}
+                    {f.file && <span className="text-argo-text">{f.file} — </span>}
+                    <span className="text-argo-textSecondary">{f.message}</span>
+                  </span>
+                </li>
+              ))}
+              {warn.map((f, i) => (
+                <li
+                  key={`warn-${i}`}
+                  className="flex items-start gap-2 text-xs font-mono text-argo-textSecondary"
+                >
+                  <CircleDotDashed className="h-3 w-3 mt-0.5 flex-shrink-0" />
+                  <span>
+                    <span>[{f.category}]</span>{' '}
+                    {f.file && <span className="text-argo-text">{f.file} — </span>}
+                    <span>{f.message}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function TestingCard({ cycle, report }: { cycle: number; report: TestingReportLite }) {
+  const tone = report.passed
+    ? 'border-argo-green/30 bg-argo-green/5'
+    : 'border-argo-red/40 bg-argo-red/5';
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      className={cn('rounded-lg border px-3.5 py-2.5', tone)}
+    >
+      <div className="flex items-start gap-2.5">
+        <PlayCircle
+          className={cn(
+            'h-3.5 w-3.5 mt-0.5 flex-shrink-0',
+            report.passed ? 'text-argo-green' : 'text-argo-red',
+          )}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="text-sm text-argo-text">
+            <span
+              className={cn('font-medium', report.passed ? 'text-argo-green' : 'text-argo-red')}
+            >
+              Runtime tests · cycle {cycle} · {report.passed ? 'all green' : 'failing'}.
+            </span>
+            <span className="text-argo-textSecondary ml-2">
+              {report.booted ? 'booted' : 'never booted'} · {(report.durationMs / 1000).toFixed(1)}s
+              · {report.routesExercised.length} routes exercised
+            </span>
+          </div>
+          {report.routesExercised.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {report.routesExercised.slice(0, 8).map((r, i) => (
+                <span
+                  key={`r-${i}`}
+                  className="text-[10px] font-mono text-argo-textSecondary border border-argo-border/40 rounded px-1.5 py-0.5"
+                >
+                  {r}
+                </span>
+              ))}
+            </div>
+          )}
+          {report.failures.length > 0 && (
+            <ul className="mt-2 space-y-1.5">
+              {report.failures.map((f, i) => (
+                <li
+                  key={`f-${i}`}
+                  className="text-[11px] font-mono text-argo-red leading-relaxed"
+                >
+                  <span className="uppercase tracking-widest text-[10px]">{f.kind.replace(/_/g, ' ')}</span>
+                  {f.criterion && (
+                    <span className="text-argo-textSecondary ml-2 normal-case">
+                      "{f.criterion}"
+                    </span>
+                  )}
+                  {f.detail && (
+                    <span className="block text-argo-textSecondary mt-0.5 ml-1">{f.detail}</span>
+                  )}
+                  {f.message && (
+                    <span className="block text-argo-textSecondary mt-0.5 ml-1">{f.message}</span>
+                  )}
+                  {f.route && (
+                    <span className="block text-argo-textSecondary mt-0.5 ml-1">
+                      {f.route} → {f.status}
+                    </span>
+                  )}
+                  {f.tail && (
+                    <pre className="block text-[10px] text-argo-textSecondary mt-0.5 ml-1 max-h-24 overflow-y-auto whitespace-pre-wrap">
+                      {f.tail}
+                    </pre>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function ToolEventStrip({ events }: { events: ToolEventLite[] }) {
+  // Pair called/completed events by name+order so the strip shows
+  // "fetch_21st_component · ok" rather than two separate chips.
+  const merged: Array<{ name: string; phase: 'called' | 'completed'; ok?: boolean; label?: string }> = [];
+  for (const e of events) {
+    if (e.phase === 'completed' && merged.length > 0) {
+      const last = merged[merged.length - 1]!;
+      if (last.name === e.name && last.phase === 'called') {
+        last.phase = 'completed';
+        if (e.ok !== undefined) last.ok = e.ok;
+        if (e.label) last.label = e.label;
+        continue;
+      }
+    }
+    merged.push({
+      name: e.name,
+      phase: e.phase,
+      ...(e.ok !== undefined ? { ok: e.ok } : {}),
+      ...(e.label ? { label: e.label } : {}),
+    });
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-[10px] uppercase tracking-widest text-argo-textSecondary font-mono inline-flex items-center gap-1">
+        <Terminal className="h-3 w-3" /> Tool calls
+      </span>
+      {merged.slice(-12).map((e, i) => {
+        const tone =
+          e.phase === 'called'
+            ? 'border-argo-accent/30 bg-argo-accent/5 text-argo-accent'
+            : e.ok === false
+            ? 'border-argo-amber/30 bg-argo-amber/5 text-argo-amber'
+            : 'border-argo-green/30 bg-argo-green/5 text-argo-green';
+        const Icon = e.phase === 'called' ? Loader2 : e.ok === false ? CircleAlert : CheckCircle2;
+        return (
+          <span
+            key={i}
+            className={cn(
+              'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-mono',
+              tone,
+            )}
+            title={e.label ?? e.name}
+          >
+            <Icon className={cn('h-3 w-3', e.phase === 'called' && 'animate-spin')} />
+            {e.name}
+            {e.label && <span className="opacity-60">· {e.label.slice(0, 30)}</span>}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 

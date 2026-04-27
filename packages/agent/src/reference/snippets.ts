@@ -2520,6 +2520,336 @@ function assertOne(a, statuses, body) {
 })();
 `,
   },
+
+  // ────────────────────────────────────────────────────────────────────
+  // Three frontend differentiators NONE of the other vibe coders ship.
+  // ────────────────────────────────────────────────────────────────────
+
+  {
+    id: 'streaming-chat-ui-with-tool-calls',
+    title: 'Streaming chat UI: SSE → message list → inline tool-call cards',
+    tags: ['ai_agent_builder', 'agent_runtime', 'fullstack_app'],
+    purpose:
+      'A real chat surface for an agent app: server-sent-events stream, character-by-character fade-in, inline cards for every tool call (tool name, dim args, "running…" or "done" indicator), and a smart scroll-to-bottom that does not fight the user. This is what makes an Argo agent app feel like a 2026 product instead of a textarea calling /chat.',
+    hintedPath: 'web/components/Agent/MessageList.tsx',
+    language: 'ts',
+    body: `// web/components/Agent/MessageList.tsx
+import { useEffect, useRef, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Bot, User, Wrench, CheckCircle2, Loader2 } from 'lucide-react';
+
+type MsgRole = 'user' | 'assistant' | 'tool_call' | 'tool_result';
+interface BaseMessage { id: string; role: MsgRole; ts: number; }
+interface TextMessage extends BaseMessage { role: 'user' | 'assistant'; text: string; streaming?: boolean; }
+interface ToolCallMessage extends BaseMessage {
+  role: 'tool_call'; toolName: string; args: Record<string, unknown>;
+  result?: { ok: boolean; output?: unknown; error?: string };
+}
+type AnyMessage = TextMessage | ToolCallMessage;
+
+export function MessageList({ threadId }: { threadId: string }) {
+  const [messages, setMessages] = useState<AnyMessage[]>([]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+
+  useEffect(() => {
+    const es = new EventSource('/api/agent/threads/' + threadId + '/stream');
+    es.addEventListener('user_message', (e) => {
+      const m = JSON.parse((e as MessageEvent).data);
+      setMessages((prev) => [...prev, { id: m.id, role: 'user', text: m.text, ts: m.ts }]);
+    });
+    es.addEventListener('assistant_token', (e) => {
+      const { id, delta, ts } = JSON.parse((e as MessageEvent).data);
+      setMessages((prev) => {
+        const i = prev.findIndex((m) => m.id === id);
+        if (i === -1) return [...prev, { id, role: 'assistant', text: delta, ts, streaming: true }];
+        const copy = [...prev]; const cur = copy[i] as TextMessage;
+        copy[i] = { ...cur, text: cur.text + delta };
+        return copy;
+      });
+    });
+    es.addEventListener('assistant_complete', (e) => {
+      const { id } = JSON.parse((e as MessageEvent).data);
+      setMessages((prev) => prev.map((m) => (m.id === id ? ({ ...m, streaming: false } as TextMessage) : m)));
+    });
+    es.addEventListener('tool_call', (e) => {
+      const { id, toolName, args, ts } = JSON.parse((e as MessageEvent).data);
+      setMessages((prev) => [...prev, { id, role: 'tool_call', toolName, args, ts }]);
+    });
+    es.addEventListener('tool_result', (e) => {
+      const { id, ok, output, error } = JSON.parse((e as MessageEvent).data);
+      setMessages((prev) =>
+        prev.map((m) => (m.id === id && m.role === 'tool_call' ? { ...m, result: { ok, output, error } } : m)),
+      );
+    });
+    return () => es.close();
+  }, [threadId]);
+
+  useEffect(() => {
+    const el = scrollRef.current; if (!el) return;
+    const onScroll = () => { stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; };
+    el.addEventListener('scroll', onScroll);
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
+  return (
+    <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
+      <AnimatePresence initial={false}>
+        {messages.map((m) => (
+          <motion.div key={m.id} layout
+            initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18 }}>
+            {m.role === 'user' && <UserBubble text={m.text} />}
+            {m.role === 'assistant' && <AssistantBubble text={m.text} streaming={m.streaming ?? false} />}
+            {m.role === 'tool_call' && <ToolCallCard call={m} />}
+          </motion.div>
+        ))}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function UserBubble({ text }: { text: string }) {
+  return (
+    <div className="flex items-start gap-3 justify-end">
+      <div className="max-w-[80%] rounded-2xl rounded-tr-md bg-accent text-bg px-4 py-2 text-sm whitespace-pre-wrap">{text}</div>
+      <div className="h-7 w-7 rounded-full bg-surface flex items-center justify-center flex-shrink-0">
+        <User className="h-3.5 w-3.5 text-text/60" />
+      </div>
+    </div>
+  );
+}
+
+function AssistantBubble({ text, streaming }: { text: string; streaming: boolean }) {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="h-7 w-7 rounded-full bg-accent/15 flex items-center justify-center flex-shrink-0">
+        <Bot className="h-3.5 w-3.5 text-accent" />
+      </div>
+      <div className="max-w-[80%] text-sm leading-relaxed text-text whitespace-pre-wrap">
+        {text}
+        {streaming && <span className="inline-block w-[2px] h-4 bg-accent ml-1 animate-pulse align-middle" />}
+      </div>
+    </div>
+  );
+}
+
+function ToolCallCard({ call }: { call: ToolCallMessage }) {
+  const status = !call.result ? 'running' : call.result.ok ? 'ok' : 'failed';
+  const Icon = status === 'running' ? Loader2 : status === 'ok' ? CheckCircle2 : Wrench;
+  const tone = status === 'running' ? 'text-accent animate-spin' : status === 'ok' ? 'text-emerald-400' : 'text-amber-400';
+  return (
+    <div className="ml-10 max-w-[80%] rounded-xl border border-text/10 bg-surface/40 px-3 py-2 text-xs">
+      <div className="flex items-center gap-2 text-text">
+        <Icon className={'h-3.5 w-3.5 ' + tone} />
+        <span className="font-mono">{call.toolName}</span>
+        <span className="text-text/40">{status}</span>
+      </div>
+      {Object.keys(call.args).length > 0 && (
+        <pre className="mt-1.5 text-[10px] font-mono text-text/50 whitespace-pre-wrap">
+          {JSON.stringify(call.args, null, 2)}
+        </pre>
+      )}
+      {call.result?.error && <div className="mt-1.5 text-[10px] font-mono text-amber-400">{call.result.error}</div>}
+    </div>
+  );
+}
+`,
+  },
+
+  {
+    id: 'agent-observability-dashboard',
+    title: 'Real-time observability dashboard reading agent_invocations',
+    tags: ['ai_agent_builder', 'agent_runtime', 'fullstack_app'],
+    purpose:
+      'An in-app dashboard showing the operator: total invocations today, success rate, p50/p95 latency, total cost, top 5 most-called agents, top 5 most-expensive tool calls. Reads from db.agent_invocations. Replit/Lovable hand you code with ZERO observability surface — operators have to build their own.',
+    hintedPath: 'web/pages/AgentObservability.tsx',
+    language: 'ts',
+    body: `// web/pages/AgentObservability.tsx
+import { useQuery } from '@tanstack/react-query';
+
+interface ObservabilityStats {
+  totalToday: number; successRate: number; totalUsdToday: number;
+  p50LatencyMs: number; p95LatencyMs: number;
+  topAgents: Array<{ name: string; count: number; totalUsd: number }>;
+  topTools: Array<{ name: string; count: number; avgMs: number }>;
+  recentFailures: Array<{ name: string; error: string; ts: string }>;
+}
+
+export default function AgentObservability() {
+  const { data, isLoading } = useQuery<ObservabilityStats>({
+    queryKey: ['agent-observability'],
+    queryFn: async () => {
+      const res = await fetch('/api/observability/agents', { credentials: 'include' });
+      if (!res.ok) throw new Error('failed');
+      return res.json();
+    },
+    refetchInterval: 15_000,
+  });
+  if (isLoading || !data) return <div className="p-12 text-text/40 text-center">Loading observability…</div>;
+
+  return (
+    <div className="px-6 py-8 max-w-6xl mx-auto">
+      <h1 className="text-3xl tracking-tight mb-6">Agents · last 24h</h1>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        <Stat label="Invocations" value={data.totalToday.toString()} />
+        <Stat label="Success rate" value={(data.successRate * 100).toFixed(1) + '%'}
+              tone={data.successRate >= 0.95 ? 'good' : data.successRate >= 0.8 ? 'warn' : 'bad'} />
+        <Stat label="LLM spend" value={'$' + data.totalUsdToday.toFixed(2)} />
+        <Stat label="p50 / p95" value={data.p50LatencyMs + 'ms / ' + data.p95LatencyMs + 'ms'} />
+      </div>
+      <section className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+        <TopList title="Most-called agents" rows={data.topAgents.map((a) => ({
+          left: a.name, right: a.count + ' · $' + a.totalUsd.toFixed(2),
+        }))} />
+        <TopList title="Most-expensive tools" rows={data.topTools.map((t) => ({
+          left: t.name, right: t.count + ' calls · ' + t.avgMs + 'ms avg',
+        }))} />
+      </section>
+      <section>
+        <h2 className="text-sm uppercase tracking-widest text-text/50 mb-3">Recent failures</h2>
+        {data.recentFailures.length === 0 ? (
+          <div className="text-text/40 text-sm">No failures in the last 24h.</div>
+        ) : (
+          <ul className="divide-y divide-text/10 border border-text/10 rounded-md">
+            {data.recentFailures.map((f, i) => (
+              <li key={i} className="px-4 py-2 text-sm flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-mono text-text truncate">{f.name}</div>
+                  <div className="text-amber-400 text-xs truncate">{f.error}</div>
+                </div>
+                <div className="text-text/40 text-xs font-mono flex-shrink-0">{relativeTime(f.ts)}</div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function Stat({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'warn' | 'bad' }) {
+  const cls = tone === 'good' ? 'text-emerald-400' : tone === 'warn' ? 'text-amber-400' : tone === 'bad' ? 'text-red-400' : 'text-text';
+  return (
+    <div className="rounded-md border border-text/10 bg-surface px-4 py-3">
+      <div className="text-[10px] uppercase tracking-widest text-text/50 font-mono">{label}</div>
+      <div className={'mt-1 text-2xl tracking-tight ' + cls}>{value}</div>
+    </div>
+  );
+}
+function TopList({ title, rows }: { title: string; rows: Array<{ left: string; right: string }> }) {
+  return (
+    <div>
+      <h3 className="text-sm uppercase tracking-widest text-text/50 mb-2">{title}</h3>
+      <ul className="border border-text/10 rounded-md divide-y divide-text/10">
+        {rows.length === 0 ? (
+          <li className="px-3 py-2 text-text/40 text-sm">no data yet</li>
+        ) : rows.map((r, i) => (
+          <li key={i} className="px-3 py-1.5 text-sm flex justify-between gap-3">
+            <span className="font-mono truncate">{r.left}</span>
+            <span className="text-text/50 font-mono flex-shrink-0">{r.right}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+function relativeTime(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60_000) return 'just now';
+  if (ms < 3_600_000) return Math.round(ms / 60_000) + 'm ago';
+  if (ms < 86_400_000) return Math.round(ms / 3_600_000) + 'h ago';
+  return Math.round(ms / 86_400_000) + 'd ago';
+}
+// Mount the route in routes/observability.js — query agent_invocations
+// for createdAt >= 24h ago, group by kind, compute percentiles.
+`,
+  },
+
+  {
+    id: 'ab-prompt-eval-harness',
+    title: 'A/B prompt eval harness — ship new prompts safely',
+    tags: ['ai_agent_builder', 'agent_runtime'],
+    purpose:
+      'When the operator wants to change an agent system prompt, they need to know whether the new version is better. This harness runs both prompts against a fixed eval set, computes win-rate using a third LLM as judge with positional debiasing, and recommends merge / keep-baseline / inconclusive. Replit/Lovable have NO answer for this.',
+    hintedPath: 'tools/ab-eval/run.js',
+    language: 'js',
+    body: `// tools/ab-eval/run.js
+// Run with: node tools/ab-eval/run.js --baseline=v1 --candidate=v2
+
+import { readFile } from 'node:fs/promises';
+import { request } from 'undici';
+
+const args = Object.fromEntries(process.argv.slice(2).map((a) => a.replace(/^--/, '').split('=')));
+if (!args.baseline || !args.candidate) {
+  console.error('usage: node tools/ab-eval/run.js --baseline=v1 --candidate=v2');
+  process.exit(2);
+}
+
+const PROMPT_DIR = 'prompts';
+const MODEL = process.env.AB_EVAL_MODEL ?? 'gpt-4o';
+const JUDGE_MODEL = process.env.AB_EVAL_JUDGE_MODEL ?? 'gpt-4o';
+const API_KEY = process.env.OPENAI_API_KEY;
+if (!API_KEY) { console.error('OPENAI_API_KEY not set'); process.exit(2); }
+
+const baselinePrompt = await readFile(PROMPT_DIR + '/' + args.baseline + '.txt', 'utf8');
+const candidatePrompt = await readFile(PROMPT_DIR + '/' + args.candidate + '.txt', 'utf8');
+const cases = JSON.parse(await readFile('tools/ab-eval/cases.json', 'utf8'));
+
+async function callModel(systemPrompt, userInput) {
+  const res = await request('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + API_KEY, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: MODEL, temperature: 0.2, max_tokens: 800,
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userInput }],
+    }),
+    bodyTimeout: 60_000,
+  });
+  return (await res.body.json()).choices?.[0]?.message?.content ?? '';
+}
+
+const JUDGE_SYSTEM = 'You compare two assistant responses to the same user prompt and pick which is BETTER for production use. Score on correctness, voice/tone consistency, conciseness. Return JSON only: { winner: "A" | "B" | "tie", reason: "<one sentence>" }.';
+
+async function judge(input, responseA, responseB) {
+  const res = await request('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + API_KEY, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: JUDGE_MODEL, response_format: { type: 'json_object' },
+      temperature: 0, max_tokens: 200,
+      messages: [
+        { role: 'system', content: JUDGE_SYSTEM },
+        { role: 'user', content: 'User input:\\n"""' + input + '"""\\n\\nResponse A:\\n"""' + responseA + '"""\\n\\nResponse B:\\n"""' + responseB + '"""\\n\\nReturn the JSON now.' },
+      ],
+    }),
+    bodyTimeout: 60_000,
+  });
+  return JSON.parse((await res.body.json()).choices?.[0]?.message?.content ?? '{}');
+}
+
+const results = [];
+for (const c of cases) {
+  const [r1, r2] = await Promise.all([callModel(baselinePrompt, c.input), callModel(candidatePrompt, c.input)]);
+  // Positional debiasing: randomise which is "A" so the judge can't lock onto position.
+  const swap = Math.random() < 0.5;
+  const a = swap ? r2 : r1;
+  const b = swap ? r1 : r2;
+  const verdict = await judge(c.input, a, b);
+  const candidateWon = (verdict.winner === 'A' && swap) || (verdict.winner === 'B' && !swap);
+  const baselineWon  = (verdict.winner === 'A' && !swap) || (verdict.winner === 'B' && swap);
+  results.push({ case: c.name, baselineWon, candidateWon, tie: !candidateWon && !baselineWon, reason: verdict.reason });
+}
+
+const wins = results.filter((r) => r.candidateWon).length;
+const winRate = wins / Math.max(1, results.length);
+const recommendation = winRate >= 0.6 ? 'merge_candidate' : winRate <= 0.4 ? 'keep_baseline' : 'inconclusive';
+console.log(JSON.stringify({ baseline: args.baseline, candidate: args.candidate, cases: results, winRate, recommendation }, null, 2));
+`,
+  },
 ];
 
 /**
