@@ -125,6 +125,57 @@ export class SupermemoryClient {
     }
   }
 
+  /**
+   * Enumerate memories for an owner (and optionally an operation). The
+   * transparency UI calls this so the operator can see — and prune —
+   * everything Argo has internalised about them. We use a wildcard
+   * search (q='*') against the same containerTags filter the writer
+   * uses so retention semantics line up exactly.
+   */
+  async list(args: {
+    ownerId: string;
+    operationId?: string;
+    limit?: number;
+  }): Promise<RetrievedMemory[]> {
+    if (!this.isEnabled) return [];
+    try {
+      const containerTags = [
+        `owner:${args.ownerId}`,
+        ...(args.operationId ? [`op:${args.operationId}`] : []),
+      ];
+      const res = await request(`${this.cfg.apiBase}/v3/search`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${this.cfg.apiKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          q: '*',
+          containerTags,
+          limit: args.limit ?? 100,
+        }),
+        bodyTimeout: 12_000,
+      });
+      if (res.statusCode >= 400) return [];
+      const body = (await res.body.json()) as {
+        results?: Array<{
+          id: string;
+          content: string;
+          metadata?: Record<string, unknown>;
+          score?: number;
+        }>;
+      };
+      return (body.results ?? []).map((r) => ({
+        id: r.id,
+        content: r.content,
+        metadata: r.metadata ?? {},
+        score: typeof r.score === 'number' ? r.score : 0,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   async forget(memoryId: string): Promise<{ ok: boolean }> {
     if (!this.isEnabled) return { ok: false };
     try {

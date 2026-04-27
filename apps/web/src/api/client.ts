@@ -293,3 +293,30 @@ export const repairs = {
   list: () => api.get<unknown[]>('/api/repairs'),
   get: (id: string) => api.get<unknown>(`/api/repairs/${id}`),
 };
+
+export type MemoryEntry = {
+  id: string;
+  content: string;
+  kind: string;
+  operationId: string | null;
+  tags: string[];
+  score: number;
+};
+
+export type MemoryListResponse = {
+  enabled: boolean;
+  count?: number;
+  memories: MemoryEntry[];
+  note?: string;
+};
+
+export const memory = {
+  list: (params?: { operationId?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.operationId) qs.set('operationId', params.operationId);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return api.get<MemoryListResponse>(`/api/memory${suffix}`);
+  },
+  forget: (id: string) => api.del<{ ok: true }>(`/api/memory/${encodeURIComponent(id)}`),
+};

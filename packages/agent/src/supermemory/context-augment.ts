@@ -46,6 +46,37 @@ export function renderMemoriesAsPromptSection(memories: readonly RetrievedMemory
 }
 
 /**
+ * Enumerate every memory we hold for an owner (optionally scoped to a
+ * single operation). Drives the workspace Memory tab so operators can
+ * see — and prune — what Argo has internalised about them.
+ */
+export async function listMemories(args: {
+  ownerId: string;
+  operationId?: string;
+  limit?: number;
+}): Promise<RetrievedMemory[]> {
+  const c = getClient();
+  if (!c.isEnabled) return [];
+  return c.list({
+    ownerId: args.ownerId,
+    ...(args.operationId !== undefined ? { operationId: args.operationId } : {}),
+    limit: args.limit ?? 100,
+  });
+}
+
+/** Forget a single memory by id. Returns whether the upstream accepted the delete. */
+export async function forgetMemory(memoryId: string): Promise<{ ok: boolean }> {
+  const c = getClient();
+  if (!c.isEnabled) return { ok: false };
+  return c.forget(memoryId);
+}
+
+/** Whether the supermemory layer is configured + active in this process. */
+export function memoryEnabled(): boolean {
+  return getClient().isEnabled;
+}
+
+/**
  * Convenience: write a new memory based on what the operator just did.
  * Called from the API layer at significant decision points (brief
  * compiled, repair approved, template saved, etc.).

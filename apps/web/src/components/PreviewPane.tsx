@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
+  Brain,
   Diff,
   Eye,
   FileCode2,
@@ -20,9 +21,10 @@ import { CodeViewer } from './CodeViewer.js';
 import { BundleDiffViewer } from './BundleDiffViewer.js';
 import { ReplayPanel } from './ReplayPanel.js';
 import { NotificationsInbox } from './NotificationsInbox.js';
+import { MemoryPanel } from './MemoryPanel.js';
 import { cn } from '../lib/utils.js';
 
-export type PreviewTab = 'preview' | 'code' | 'diff' | 'replay' | 'inbox';
+export type PreviewTab = 'preview' | 'code' | 'diff' | 'replay' | 'inbox' | 'memory';
 
 interface PreviewPaneProps {
   operation: Operation | null;
@@ -125,6 +127,9 @@ export function PreviewPane({ operation }: PreviewPaneProps) {
           <TabButton active={tab === 'inbox'} onClick={() => setTab('inbox')} icon={<Inbox className="h-3.5 w-3.5" />}>
             Inbox
           </TabButton>
+          <TabButton active={tab === 'memory'} onClick={() => setTab('memory')} icon={<Brain className="h-3.5 w-3.5" />}>
+            Memory
+          </TabButton>
         </div>
         {tab === 'preview' && (
           <div className="flex items-center gap-3">
@@ -217,6 +222,17 @@ export function PreviewPane({ operation }: PreviewPaneProps) {
               className="absolute inset-0"
             >
               <NotificationsInbox />
+            </motion.div>
+          ) : tab === 'memory' ? (
+            <motion.div
+              key="memory"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0"
+            >
+              <MemoryPanel operationId={operation.id} />
             </motion.div>
           ) : (
             <motion.div

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { tokensMatch } from '@argo/security';
+import { rememberDecision } from '@argo/agent';
 import { getMongo } from '../db/mongo.js';
 import { getPrisma } from '../db/prisma.js';
 import { requireSession } from '../plugins/auth-plugin.js';
@@ -72,6 +73,21 @@ export async function registerRepairsRoutes(app: FastifyInstance) {
         message: 'Repair approved — applying.',
       });
       broadcastToOwner(op.ownerId, { type: 'activity', payload: a });
+
+      // Capture the approval as a memory so future repair proposals
+      // know which kinds of changes the operator already accepted —
+      // less hand-wringing on the next round-trip.
+      const failureKind = String(repair.failureKind ?? 'unknown');
+      const whatChanged = String(repair.whatChanged ?? '').slice(0, 240);
+      if (whatChanged) {
+        await rememberDecision({
+          ownerId: op.ownerId,
+          operationId: op.id,
+          kind: 'workflow_decision',
+          content: `Approved repair on "${op.name}" (${failureKind}): ${whatChanged}`,
+          tags: ['repair-approved', failureKind],
+        }).catch(() => undefined);
+      }
     }
 
     logger.info({ repairId: id }, 'repair approved via email link');
