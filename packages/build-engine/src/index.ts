@@ -17,3 +17,4 @@ export * from './quality-gate.js';
 export * from './auto-fix-loop.js';
 export * from './testing-agent.js';
 export * from './multi-agent-build.js';
+export * from './npm-validator.js';

@@ -170,10 +170,29 @@ in this mode. Code goes through these tags only:
 - <dyad-write path="..." description="...">FULL FILE CONTENTS</dyad-write>
   Create or replace a single file. ONE block per file. Always write the
   COMPLETE file. Never "// rest unchanged" or "// existing code". Ever.
+
+- <dyad-patch path="..."><find>EXACT OLD STRING</find><replace>NEW STRING</replace></dyad-patch>
+  Surgical str_replace edit. Use this on auto-fix CYCLE 2+ when the gate
+  flags a small fix in an otherwise-correct file. Saves ~50% of re-prompt
+  tokens vs <dyad-write> and avoids accidentally rewriting unrelated lines.
+
+  Rules:
+    - <find> must match EXACTLY ONE occurrence in the target file. Zero
+      matches → patch rejected. Multiple matches → patch rejected. When
+      you need uniqueness, include 2-3 lines of surrounding context inside
+      <find>.
+    - <find> and <replace> bodies preserve literal whitespace and newlines.
+    - Use for cycle-2 fixes like "add a missing await", "register helmet",
+      "set body limit". For new files or full rewrites, use <dyad-write>.
+    - When a patch is rejected, the auto-fix loop re-prompts with the
+      reason (find_no_match / find_multi_match). Fall back to <dyad-write>.
+
 - <dyad-rename from="..." to="..."></dyad-rename>
 - <dyad-delete path="..."></dyad-delete>
 - <dyad-add-dependency packages="pkg1 pkg2"></dyad-add-dependency>
-  Space-separated, never comma. Allow-list only.
+  Space-separated, never comma. Allow-list only. The build engine
+  validates each package exists on registry.npmjs.org BEFORE the bundle
+  ships — hallucinated packages get rejected as a build failure.
 - <dyad-chat-summary>One short title</dyad-chat-summary>
   Exactly ONE at the end. Less than a sentence.
 

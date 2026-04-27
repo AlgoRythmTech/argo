@@ -38,13 +38,36 @@ export interface ParsedChatSummaryAction {
   summary: string;
 }
 
+/**
+ * Surgical patch — the str_replace pattern Anthropic's text_editor tool uses.
+ * Saves ~50% of re-prompt token cost vs full file rewrites and reduces the
+ * regression risk of "model rewrote unrelated lines while fixing one."
+ *
+ *   <dyad-patch path="server.js">
+ *   <find>app.register(rateLimit, { global: false, max: 60 });</find>
+ *   <replace>app.register(rateLimit, { global: false, max: 60, timeWindow: '1 minute' });</replace>
+ *   </dyad-patch>
+ *
+ * The `find` block must match EXACTLY one occurrence in the target file.
+ * Zero matches → the patch is rejected and surfaced as a quality-gate
+ * failure. Multiple matches → also rejected (require the model to add
+ * surrounding context).
+ */
+export interface ParsedPatchAction {
+  kind: 'patch';
+  path: string;
+  find: string;
+  replace: string;
+}
+
 export type ParsedAction =
   | ParsedWriteAction
   | ParsedRenameAction
   | ParsedDeleteAction
   | ParsedAddDependencyAction
   | ParsedCommandAction
-  | ParsedChatSummaryAction;
+  | ParsedChatSummaryAction
+  | ParsedPatchAction;
 
 export interface ParseResult {
   actions: ParsedAction[];
@@ -56,6 +79,8 @@ export interface ParseResult {
 
 const WRITE_OPEN = /<dyad-write\b([^>]*)>/g;
 const WRITE_CLOSE = /<\/dyad-write>/;
+const PATCH_OPEN = /<dyad-patch\b([^>]*)>/g;
+const PATCH_CLOSE = /<\/dyad-patch>/;
 const RENAME = /<dyad-rename\b([^>]*)\/?>(?:<\/dyad-rename>)?/g;
 const DELETE = /<dyad-delete\b([^>]*)\/?>(?:<\/dyad-delete>)?/g;
 const ADD_DEP = /<dyad-add-dependency\b([^>]*)\/?>(?:<\/dyad-add-dependency>)?/g;
@@ -100,6 +125,33 @@ export function parseDyadResponse(streamed: string): ParseResult {
       contents: streamed.slice(bodyStart, bodyEnd).replace(/^\n/, '').replace(/\n$/, ''),
     });
     writeRanges.push([openStart, blockEnd]);
+  }
+
+  // 1b. Patch blocks — surgical str_replace edits.
+  const patchRanges: Array<[number, number]> = [];
+  PATCH_OPEN.lastIndex = 0;
+  let patchMatch: RegExpExecArray | null;
+  while ((patchMatch = PATCH_OPEN.exec(streamed)) !== null) {
+    const openStart = patchMatch.index;
+    const openEnd = patchMatch.index + patchMatch[0].length;
+    const after = streamed.slice(openEnd);
+    const closeMatch = after.match(PATCH_CLOSE);
+    if (!closeMatch || typeof closeMatch.index !== 'number') continue;
+    const bodyEnd = openEnd + closeMatch.index;
+    const blockEnd = bodyEnd + '</dyad-patch>'.length;
+    const path = attr(patchMatch[1] ?? '', 'path');
+    if (!path) continue;
+    const body = streamed.slice(openEnd, bodyEnd);
+    const findMatch = body.match(/<find>([\s\S]*?)<\/find>/);
+    const replaceMatch = body.match(/<replace>([\s\S]*?)<\/replace>/);
+    if (!findMatch || !replaceMatch) continue;
+    actions.push({
+      kind: 'patch',
+      path,
+      find: findMatch[1] ?? '',
+      replace: replaceMatch[1] ?? '',
+    });
+    patchRanges.push([openStart, blockEnd]);
   }
 
   // 2. Self-closing actions.
@@ -162,6 +214,7 @@ export function parseDyadResponse(streamed: string): ParseResult {
   // 4. Prose = streamed minus all tag ranges.
   const allRanges = [
     ...writeRanges,
+    ...patchRanges,
     ...renames.map(([a, b]) => [a, b] as [number, number]),
     ...deletes.map(([a, b]) => [a, b] as [number, number]),
     ...addDeps.map(([a, b]) => [a, b] as [number, number]),
@@ -199,6 +252,13 @@ export function parseDyadResponse(streamed: string): ParseResult {
  * (not Electron), so we don't write to disk — we accumulate the changes in
  * a Map<path, contents> that the build engine then bundles for Blaxel.
  */
+export interface PatchFailure {
+  path: string;
+  reason: 'file_not_found' | 'find_no_match' | 'find_multi_match' | 'find_empty';
+  /** First 120 chars of the find string, for error messages. */
+  findPreview: string;
+}
+
 export function applyActionsToFileMap(
   current: Map<string, string>,
   actions: ParsedAction[],
@@ -211,6 +271,8 @@ export function applyActionsToFileMap(
   newDependencies: string[];
   commands: ParsedCommandAction['command'][];
   summary: string | null;
+  /** Patches that couldn't be applied — surfaced to the auto-fix loop. */
+  patchFailures: PatchFailure[];
 } {
   const files = new Map(current);
   const added: string[] = [];
@@ -219,6 +281,7 @@ export function applyActionsToFileMap(
   const renamed: Array<{ from: string; to: string }> = [];
   const newDependencies: string[] = [];
   const commands: ParsedCommandAction['command'][] = [];
+  const patchFailures: PatchFailure[] = [];
   let summary: string | null = null;
 
   for (const action of actions) {
@@ -227,6 +290,20 @@ export function applyActionsToFileMap(
         const existed = files.has(action.path);
         files.set(action.path, action.contents);
         (existed ? modified : added).push(action.path);
+        break;
+      }
+      case 'patch': {
+        const result = applyPatch(files.get(action.path), action.find, action.replace);
+        if (result.ok) {
+          files.set(action.path, result.contents);
+          if (!modified.includes(action.path)) modified.push(action.path);
+        } else {
+          patchFailures.push({
+            path: action.path,
+            reason: result.reason,
+            findPreview: action.find.replace(/\s+/g, ' ').slice(0, 120),
+          });
+        }
         break;
       }
       case 'rename': {
@@ -253,7 +330,32 @@ export function applyActionsToFileMap(
     }
   }
 
-  return { files, added, modified, removed, renamed, newDependencies, commands, summary };
+  return { files, added, modified, removed, renamed, newDependencies, commands, summary, patchFailures };
+}
+
+/**
+ * Apply one str_replace patch. Refuses ambiguous edits (zero or multiple
+ * matches) so the agent can never accidentally rewrite the wrong line.
+ * Same semantics as Anthropic's text_editor_20250728 str_replace command.
+ */
+export function applyPatch(
+  current: string | undefined,
+  find: string,
+  replace: string,
+): { ok: true; contents: string } | { ok: false; reason: PatchFailure['reason'] } {
+  if (current === undefined) return { ok: false, reason: 'file_not_found' };
+  if (find.length === 0) return { ok: false, reason: 'find_empty' };
+  // Normalise leading/trailing newlines on find — model often pads with one.
+  const trimmedFind = find.replace(/^\n/, '').replace(/\n$/, '');
+  const idx = current.indexOf(trimmedFind);
+  if (idx === -1) return { ok: false, reason: 'find_no_match' };
+  const lastIdx = current.lastIndexOf(trimmedFind);
+  if (lastIdx !== idx) return { ok: false, reason: 'find_multi_match' };
+  const trimmedReplace = replace.replace(/^\n/, '').replace(/\n$/, '');
+  return {
+    ok: true,
+    contents: current.slice(0, idx) + trimmedReplace + current.slice(idx + trimmedFind.length),
+  };
 }
 
 export function fingerprintFiles(files: Map<string, string>): Map<string, string> {

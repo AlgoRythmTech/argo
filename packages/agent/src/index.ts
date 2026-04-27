@@ -5,6 +5,7 @@ export * from './llm/openai.js';
 export * from './llm/anthropic.js';
 export * from './llm/specialist-prompts.js';
 export * from './llm/stream-build.js';
+export * from './llm/model-router.js';
 export * from './listening/index.js';
 export * from './mapping/index.js';
 export * from './running/index.js';

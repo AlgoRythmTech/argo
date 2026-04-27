@@ -26,6 +26,7 @@ import { request } from 'undici';
 import { z } from 'zod';
 import {
   buildSpecialistSystemPrompt,
+  routeModel,
   type Specialist,
 } from '@argo/agent';
 
@@ -117,10 +118,8 @@ export async function runArchitect(args: RunArchitectArgs): Promise<FilePlan> {
   const apiKey = process.env.OPENAI_API_KEY ?? '';
   if (!apiKey) throw new Error('OPENAI_API_KEY missing');
   const apiBase = process.env.OPENAI_API_BASE ?? 'https://api.openai.com/v1';
-  const primary = args.model ?? process.env.OPENAI_MODEL_PRIMARY ?? 'gpt-5.5';
-  const fallback = process.env.OPENAI_MODEL_FALLBACK ?? 'gpt-4o';
-
-  const candidates = [primary, fallback].filter((m, i, a) => a.indexOf(m) === i);
+  const routing = routeModel('architect', args.model ? { primary: args.model } : {});
+  const candidates = routing.candidates;
   let lastErr: Error | null = null;
   // Layer the specialist's patterns on top of the architect prompt so
   // a fullstack_app architect knows to plan for vite + react + tailwind,
@@ -251,10 +250,8 @@ export async function runReviewer(args: RunReviewerArgs): Promise<ReviewReport> 
   const apiKey = process.env.OPENAI_API_KEY ?? '';
   if (!apiKey) throw new Error('OPENAI_API_KEY missing');
   const apiBase = process.env.OPENAI_API_BASE ?? 'https://api.openai.com/v1';
-  const primary = args.model ?? process.env.OPENAI_MODEL_PRIMARY ?? 'gpt-5.5';
-  const fallback = process.env.OPENAI_MODEL_FALLBACK ?? 'gpt-4o';
-
-  const candidates = [primary, fallback].filter((m, i, a) => a.indexOf(m) === i);
+  const routing = routeModel('reviewer', args.model ? { primary: args.model } : {});
+  const candidates = routing.candidates;
   let lastErr: Error | null = null;
   for (const model of candidates) {
     try {

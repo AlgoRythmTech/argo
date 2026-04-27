@@ -16,6 +16,7 @@ import {
   type FilePlan,
   type ReviewReport,
 } from './multi-agent-build.js';
+import { validateDependencies, renderDependencyFailures, type DependencyValidationResult } from './npm-validator.js';
 
 export interface AutoFixArgs {
   specialist: Specialist;
@@ -53,6 +54,13 @@ export interface AutoFixArgs {
    * generator path that's already proven).
    */
   enableRuntimeTesting?: boolean;
+  /**
+   * When true, validate every npm dependency declared in package.json
+   * against registry.npmjs.org before running the runtime test. Catches
+   * hallucinated packages BEFORE pnpm install fails. Default true.
+   * Set false for tests / offline runs.
+   */
+  enableNpmValidation?: boolean;
   /**
    * Spec-as-tests. The deploy route compiles brief.successCriteria into
    * a list of runtime assertions and passes them through here. The
@@ -98,6 +106,7 @@ export type AutoFixCycleEvent =
   | { kind: 'cycle_start'; cycle: number; promptLength: number }
   | { kind: 'actions_parsed'; cycle: number; actions: ParsedAction[]; prose: string }
   | { kind: 'gate_run'; cycle: number; report: QualityReport }
+  | { kind: 'npm_check'; cycle: number; result: DependencyValidationResult }
   | { kind: 'testing_run'; cycle: number; report: TestingReport }
   | { kind: 'reviewer_run'; cycle: number; report: ReviewReport }
   | { kind: 'cycle_complete'; cycle: number; passed: boolean }
@@ -244,16 +253,68 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
 
     const bundle = filesToBundle(files, args.manifest);
     const report = runQualityGate(bundle);
+
+    // Fold any patch failures into the gate's autoFixPrompt so the next
+    // cycle re-prompts the model with what went wrong. A patch that
+    // couldn't be applied is a real bug — usually the model emitted a
+    // <find> string that doesn't exist verbatim in the file.
+    if (applied.patchFailures.length > 0) {
+      const patchLines = ['', '## Patch failures (from this cycle\'s <dyad-patch> blocks)', ''];
+      for (const f of applied.patchFailures) {
+        patchLines.push(
+          `- ${f.path} → ${f.reason}: "${f.findPreview}${f.findPreview.length >= 120 ? '…' : ''}"`,
+        );
+      }
+      patchLines.push(
+        '',
+        'find_no_match means the <find> block does not appear verbatim in the file.',
+        'find_multi_match means the <find> block matches more than once — add surrounding lines for unique context.',
+        'When a patch fails, fall back to a full <dyad-write> for that file.',
+      );
+      // Mutate the report's autoFixPrompt directly — preserves shape for SSE.
+      // (report.passed stays as-is; gate may have separately failed.)
+      report.autoFixPrompt = (report.autoFixPrompt || '# Quality gate notes') + '\n' + patchLines.join('\n');
+      // If only patches failed and the gate is clean, don't pass the cycle.
+      const allErrors = report.issues.filter((i) => i.severity === 'error');
+      if (report.passed && allErrors.length === 0) {
+        report.passed = false;
+        report.errorCount = applied.patchFailures.length;
+      }
+    }
     lastReport = report;
     const gateEvt: AutoFixCycleEvent = { kind: 'gate_run', cycle, report };
     history.push(gateEvt);
     args.onCycle?.(gateEvt);
 
-    // Runtime testing agent: only after the static gate is clean.
-    // Failing the static gate means the bundle isn't even worth booting.
+    // NPM dependency validation: only run after the static gate is
+    // clean. If a package is hallucinated, we re-prompt the model with
+    // the exact bad name BEFORE wasting boot time on it.
+    let npmResult: DependencyValidationResult | null = null;
+    const npmValidationEnabled = args.enableNpmValidation !== false;
+    if (report.passed && npmValidationEnabled) {
+      try {
+        npmResult = await validateDependencies(bundle, {
+          ...(args.signal ? { signal: args.signal } : {}),
+        });
+        const npmEvt: AutoFixCycleEvent = { kind: 'npm_check', cycle, result: npmResult };
+        history.push(npmEvt);
+        args.onCycle?.(npmEvt);
+      } catch (err) {
+        // Best-effort — npm registry hiccup never fails the build.
+        console.warn('[auto-fix-loop] npm validation crashed:', String(err).slice(0, 200));
+      }
+    }
+
+    // Runtime testing agent: only after the static gate is clean AND
+    // the npm validation didn't find hallucinations. If npm flagged
+    // packages we won't waste a boot — re-prompt instead.
     let testingReport: TestingReport | null = null;
     const runtimeTestingEnabled = args.enableRuntimeTesting !== false;
-    if (report.passed && runtimeTestingEnabled) {
+    if (
+      report.passed &&
+      runtimeTestingEnabled &&
+      (npmResult == null || npmResult.allValid)
+    ) {
       try {
         testingReport = await runTestingAgent({
           bundle,
@@ -307,6 +368,7 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
 
     const cyclePassed =
       report.passed &&
+      (npmResult == null || npmResult.allValid) &&
       (testingReport == null || testingReport.passed) &&
       (reviewReport == null || reviewReport.passed);
     const completeEvt: AutoFixCycleEvent = {
@@ -345,6 +407,9 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
       ...(reviewReport && !reviewReport.passed
         ? { reviewerReport: renderReviewAsAutoFixPrompt(reviewReport) }
         : {}),
+      ...(npmResult && !npmResult.allValid
+        ? { npmReport: renderDependencyFailures(npmResult.failures) }
+        : {}),
     });
   }
 
@@ -370,6 +435,8 @@ function composeRetryPrompt(args: {
   runtimeReport?: string;
   /** Optional reviewer report when multi-agent mode caught issues. */
   reviewerReport?: string;
+  /** Optional npm validation report when packages were hallucinated. */
+  npmReport?: string;
 }): string {
   const lines: string[] = [
     args.originalPrompt,
@@ -386,6 +453,10 @@ function composeRetryPrompt(args: {
     lines.push(args.report.autoFixPrompt);
     lines.push('');
   }
+  if (args.npmReport) {
+    lines.push(args.npmReport);
+    lines.push('');
+  }
   if (args.runtimeReport) {
     lines.push('## Runtime testing failures');
     lines.push('');
@@ -399,9 +470,11 @@ function composeRetryPrompt(args: {
     lines.push('');
   }
   lines.push(
-    'Re-emit ONLY the files that need fixing using <dyad-write>. Do not',
-    'touch unrelated files. Each <dyad-write> must contain the FULL new file',
-    'contents (no partial diffs). End with one <dyad-chat-summary>.',
+    'Re-emit ONLY the files that need fixing. For small fixes, prefer',
+    '<dyad-patch path="..."><find>OLD</find><replace>NEW</replace></dyad-patch>',
+    'over a full rewrite. For new files or major rewrites use <dyad-write>.',
+    'Each <dyad-write> must contain the FULL new file contents (no partial',
+    'diffs). End with one <dyad-chat-summary>.',
   );
   return lines.join('\n');
 }

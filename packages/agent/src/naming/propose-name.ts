@@ -12,6 +12,7 @@
 
 import { z } from 'zod';
 import { request } from 'undici';
+import { routeModel } from '../llm/model-router.js';
 
 export const ProposedName = z.object({
   /** 2-4 words, Title Case, no punctuation, no quotes. */
@@ -58,10 +59,10 @@ export async function proposeOperationName(args: ProposeNameArgs): Promise<Propo
   const apiKey = process.env.OPENAI_API_KEY ?? '';
   if (!apiKey) throw new Error('OPENAI_API_KEY missing');
   const apiBase = process.env.OPENAI_API_BASE ?? 'https://api.openai.com/v1';
-  const primary = args.model ?? process.env.OPENAI_MODEL_PRIMARY ?? 'gpt-5.5';
-  const fallback = process.env.OPENAI_MODEL_FALLBACK ?? 'gpt-4o';
-
-  const candidates = [primary, fallback].filter((m, i, arr) => arr.indexOf(m) === i);
+  // Naming is a 60-token output structured call — gpt-4o-mini is plenty.
+  // Saves ~40× on cost vs always running gpt-5.5 for a 2-word title.
+  const routing = routeModel('classifier', args.model ? { primary: args.model } : {});
+  const candidates = routing.candidates;
   let lastErr: Error | null = null;
 
   for (const model of candidates) {
