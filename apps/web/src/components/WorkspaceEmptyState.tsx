@@ -9,16 +9,20 @@
 // sales / support / finance / product / marketing) so most operators
 // see something close to their actual use case.
 
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   Briefcase,
   CalendarClock,
   Inbox,
+  Loader2,
   Mail,
+  PlayCircle,
   ShieldCheck,
   Sparkles,
   Wallet,
 } from 'lucide-react';
+import { dev } from '../api/client.js';
 
 interface ExampleWorkflow {
   icon: typeof Sparkles;
@@ -96,9 +100,35 @@ interface WorkspaceEmptyStateProps {
    * can edit before sending.
    */
   onPickExample: (sentence: string) => void;
+  /**
+   * Demo-mode shortcut: pops a fully-loaded example operation into
+   * the workspace via /api/dev/seed-demo. Caller refreshes the ops
+   * list + selects the returned operation id.
+   */
+  onSeedDemo?: (operationId: string) => void;
 }
 
-export function WorkspaceEmptyState({ firstName, onPickExample }: WorkspaceEmptyStateProps) {
+export function WorkspaceEmptyState({
+  firstName,
+  onPickExample,
+  onSeedDemo,
+}: WorkspaceEmptyStateProps) {
+  const [seeding, setSeeding] = useState(false);
+  const [seedError, setSeedError] = useState<string | null>(null);
+
+  const seedDemo = async () => {
+    setSeeding(true);
+    setSeedError(null);
+    try {
+      const res = await dev.seedDemo();
+      onSeedDemo?.(res.operationId);
+    } catch (err) {
+      setSeedError(String((err as { message?: string })?.message ?? err).slice(0, 200));
+    } finally {
+      setSeeding(false);
+    }
+  };
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-4xl mx-auto px-8 py-12">
@@ -106,25 +136,53 @@ export function WorkspaceEmptyState({ firstName, onPickExample }: WorkspaceEmpty
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-          className="mb-10"
+          className="mb-10 flex items-start justify-between gap-6"
         >
-          <div className="flex items-center gap-2 mb-3 text-argo-accent">
-            <Sparkles className="h-4 w-4" />
-            <span className="text-xs uppercase tracking-widest">
-              {firstName ? `Welcome, ${firstName}` : 'Welcome to Argo'}
-            </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 mb-3 text-argo-accent">
+              <Sparkles className="h-4 w-4" />
+              <span className="text-xs uppercase tracking-widest">
+                {firstName ? `Welcome, ${firstName}` : 'Welcome to Argo'}
+              </span>
+            </div>
+            <h1
+              className="argo-hero text-4xl text-argo-text mb-3"
+              style={{ letterSpacing: '-0.05em', lineHeight: 1.05 }}
+            >
+              What would you like Argo to operate?
+            </h1>
+            <p className="text-argo-textSecondary argo-body text-base max-w-2xl">
+              Describe the workflow in one sentence — Argo will follow up with 4–6 click-through
+              questions to nail the scope, then build the entire production stack. Or pick one
+              of these to get started.
+            </p>
           </div>
-          <h1
-            className="argo-hero text-4xl text-argo-text mb-3"
-            style={{ letterSpacing: '-0.05em', lineHeight: 1.05 }}
-          >
-            What would you like Argo to operate?
-          </h1>
-          <p className="text-argo-textSecondary argo-body text-base max-w-2xl">
-            Describe the workflow in one sentence — Argo will follow up with 4–6 click-through
-            questions to nail the scope, then build the entire production stack. Or pick one
-            of these to get started.
-          </p>
+          {onSeedDemo && (
+            <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+              <button
+                type="button"
+                onClick={seedDemo}
+                disabled={seeding}
+                title="Pop a fully-loaded example operation into the workspace"
+                className="inline-flex items-center gap-2 rounded-full border border-argo-accent/40 bg-argo-accent/10 text-argo-accent hover:bg-argo-accent hover:text-argo-bg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-60"
+              >
+                {seeding ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <PlayCircle className="h-4 w-4" />
+                )}
+                {seeding ? 'Seeding…' : 'Load demo workspace'}
+              </button>
+              <span className="text-[11px] text-argo-textSecondary font-mono">
+                For board-style walkthroughs
+              </span>
+              {seedError && (
+                <span className="text-[11px] text-argo-amber font-mono max-w-[220px] text-right">
+                  {seedError}
+                </span>
+              )}
+            </div>
+          )}
         </motion.header>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

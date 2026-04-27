@@ -329,6 +329,12 @@ export function Workspace() {
               <WorkspaceEmptyState
                 {...(me?.email ? { firstName: me.email.split('@')[0] } : {})}
                 onPickExample={(sentence) => void sendPrompt(sentence, [], 'default')}
+                onSeedDemo={(operationId) => {
+                  void operations.list().then((rows) => {
+                    setOps(rows);
+                    setActiveId(operationId);
+                  });
+                }}
               />
             ) : (
               <PreviewPane operation={activeOp} />

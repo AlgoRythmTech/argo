@@ -23,6 +23,7 @@ import { registerNotificationsRoutes } from './routes/notifications.js';
 import { registerReplayRoutes } from './routes/replay.js';
 import { registerBillingRoutes } from './routes/billing.js';
 import { registerMemoryRoutes } from './routes/memory.js';
+import { registerDevRoutes } from './routes/dev.js';
 import { registerAuthPlugin } from './plugins/auth-plugin.js';
 import { attachSocketIo } from './realtime/socket.js';
 import { startDigestWorker } from './jobs/digest-worker.js';
@@ -72,6 +73,7 @@ async function main() {
   await registerReplayRoutes(app);
   await registerBillingRoutes(app);
   await registerMemoryRoutes(app);
+  await registerDevRoutes(app);
 
   // Eager init.
   await getMongo();

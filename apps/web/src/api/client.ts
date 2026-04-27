@@ -353,6 +353,17 @@ export const repairs = {
   get: (id: string) => api.get<unknown>(`/api/repairs/${id}`),
 };
 
+export const dev = {
+  seedDemo: () =>
+    api.post<{
+      ok: true;
+      operationId: string;
+      name: string;
+      slug: string;
+      publicUrl: string | null;
+    }>('/api/dev/seed-demo', {}),
+};
+
 export type MemoryEntry = {
   id: string;
   content: string;
