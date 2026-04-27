@@ -69,9 +69,27 @@ export interface ProjectBrief {
   generatedAt: string;
 }
 
+export interface RefinementResult {
+  refined: boolean;
+  refinementSummary: string;
+  /** When refined=true, the new follow-up questionnaire to ask. */
+  questionnaire?: ScopingQuestionnaire;
+  /** Per-question explanation of why the LLM asked it. */
+  rationales?: Array<{ questionId: string; rationale: string }>;
+  /** Set when the upstream refinement service errored — UI degrades gracefully. */
+  warning?: string;
+}
+
 export const scoping = {
   start: (operationId: string, sentence: string) =>
     api.post<ScopingQuestionnaire>('/api/scoping/start', { operationId, sentence }),
+  /**
+   * Optional second-round refinement. Submit the operator's first-round
+   * answers; the LLM either returns a follow-up questionnaire (refined:true)
+   * or signals the brief is already crisp enough to finalise.
+   */
+  refine: (operationId: string, submission: QuestionnaireSubmission) =>
+    api.post<RefinementResult>('/api/scoping/refine', { operationId, submission }),
   finalize: (operationId: string, submission: QuestionnaireSubmission) =>
     api.post<{ ok: true; brief: ProjectBrief; buildPrompt: string }>('/api/scoping/finalize', {
       operationId,

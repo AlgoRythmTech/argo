@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import {
   compileBrief,
+  generateFollowups,
   generateQuestionnaire,
   rememberDecision,
   renderBriefAsPrompt,
@@ -26,6 +27,11 @@ const StartBody = z.object({
 });
 
 const FinalizeBody = z.object({
+  operationId: z.string().min(1),
+  submission: QuestionnaireSubmission,
+});
+
+const RefineBody = z.object({
   operationId: z.string().min(1),
   submission: QuestionnaireSubmission,
 });
@@ -60,6 +66,100 @@ export async function registerScopingRoutes(app: FastifyInstance) {
     } as Record<string, unknown>);
 
     return reply.send(questionnaire);
+  });
+
+  /**
+   * POST /api/scoping/refine
+   *
+   * Optional second-round refinement. The operator answered the first
+   * questionnaire; before we lock the brief, the LLM gets a chance to
+   * mint 1-3 follow-up questions when the compiled brief reveals
+   * meaningful gaps. Returns either:
+   *   { refined: true,  questionnaire, refinementSummary, rationales }
+   *   { refined: false, refinementSummary }                   // already crisp
+   * The UI shows the new questions inline; on second submit the
+   * operator hits /finalize as usual (which compiles the merged
+   * answers via merge logic that already handles repeat briefField
+   * answers — last write wins per field).
+   */
+  app.post('/api/scoping/refine', async (request, reply) => {
+    const session = requireSession(request, reply);
+    if (!session) return;
+    const parsed = RefineBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
+    }
+    const op = await getPrisma().operation.findFirst({
+      where: { id: parsed.data.operationId, ownerId: session.userId },
+    });
+    if (!op) return reply.code(404).send({ error: 'not_found' });
+
+    const { db } = await getMongo();
+    const questionnaireDoc = await db
+      .collection('scoping_questionnaires')
+      .findOne({ id: parsed.data.submission.questionnaireId });
+    if (!questionnaireDoc) return reply.code(404).send({ error: 'questionnaire_not_found' });
+
+    const questionnaireParsed = ScopingQuestionnaire.safeParse(questionnaireDoc);
+    if (!questionnaireParsed.success) {
+      return reply.code(500).send({ error: 'questionnaire_corrupt' });
+    }
+
+    let draftBrief;
+    try {
+      draftBrief = compileBrief({
+        questionnaire: questionnaireParsed.data,
+        submission: parsed.data.submission,
+        fallbackName: op.name,
+        ownerEmail: session.email,
+      });
+    } catch (err) {
+      return reply.code(422).send({ error: 'brief_compile_failed', detail: String(err).slice(0, 400) });
+    }
+
+    let result;
+    try {
+      result = await generateFollowups({
+        brief: draftBrief,
+        questionnaire: questionnaireParsed.data,
+        submission: parsed.data.submission,
+      });
+    } catch (err) {
+      // Refinement is best-effort. If the LLM is down or the response
+      // mis-shapes, we degrade to "no refinement needed" so the
+      // operator can still finalise the brief.
+      return reply.send({
+        refined: false,
+        refinementSummary: 'Skipped — refinement service unavailable.',
+        warning: String(err).slice(0, 200),
+      });
+    }
+
+    if (result.refined && result.questionnaire) {
+      // Persist the follow-up questionnaire so /finalize can find it
+      // when the operator submits the second round.
+      await db.collection('scoping_questionnaires').insertOne({
+        _id: result.questionnaire.id as unknown as never,
+        ...result.questionnaire,
+        operationId: op.id,
+        ownerId: session.userId,
+        priorQuestionnaireId: questionnaireParsed.data.id,
+        kind: 'refinement',
+        persistedAt: new Date().toISOString(),
+      } as Record<string, unknown>);
+
+      return reply.send({
+        refined: true,
+        refinementSummary: result.refinementSummary,
+        questionnaire: result.questionnaire,
+        rationales: result.rationales,
+      });
+    }
+
+    return reply.send({
+      refined: false,
+      refinementSummary: result.refinementSummary,
+    });
   });
 
   app.post('/api/scoping/finalize', async (request, reply) => {
