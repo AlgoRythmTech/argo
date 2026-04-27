@@ -1626,6 +1626,362 @@ function encrypt(plain, ownerId) {
 }
 `,
   },
+
+  // ────────────────────────────────────────────────────────────────────
+  // Frontend snippets — pulled in by fullstack_app + multi_tenant_saas +
+  // internal_tool. The dispatcher fires these when the brief calls for
+  // a UI surface alongside the backend.
+  // ────────────────────────────────────────────────────────────────────
+
+  {
+    id: 'vite-react-tailwind-bootstrap',
+    title: 'Vite + React 18 + Tailwind v3 production bootstrap',
+    tags: ['fullstack_app', 'multi_tenant_saas', 'internal_tool'],
+    purpose:
+      'The exact files Argo ships when a build needs a frontend. Vite outputs to web/dist/ which the Fastify server statically mounts. Tailwind v3 with custom-property tokens for dark mode. No Next.js — the simpler stack ships in 90 seconds and never has hydration bugs.',
+    hintedPath: 'web/vite.config.ts',
+    language: 'ts',
+    body: `// web/vite.config.ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import path from 'node:path';
+export default defineConfig({
+  plugins: [react()],
+  resolve: { alias: { '@': path.resolve(__dirname, '.') } },
+  build: { outDir: 'dist', sourcemap: true, target: 'es2022' },
+  server: { port: 5173, proxy: { '/api': 'http://localhost:3000' } },
+});
+
+// web/tailwind.config.ts
+import type { Config } from 'tailwindcss';
+export default {
+  content: ['./index.html', './**/*.{ts,tsx}'],
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        bg: 'rgb(var(--bg) / <alpha-value>)',
+        surface: 'rgb(var(--surface) / <alpha-value>)',
+        text: 'rgb(var(--text) / <alpha-value>)',
+        accent: 'rgb(var(--accent) / <alpha-value>)',
+      },
+      fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+    },
+  },
+} satisfies Config;
+
+// web/styles/globals.css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@layer base {
+  :root { --bg: 10 10 11; --surface: 18 18 20; --text: 242 240 235; --accent: 0 229 204; }
+  html { color-scheme: dark; }
+  body { @apply bg-bg text-text font-sans antialiased; }
+  h1, h2, h3 { letter-spacing: -0.04em; }
+}
+
+// web/main.tsx
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import App from './App.js';
+import './styles/globals.css';
+const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000 } } });
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <QueryClientProvider client={queryClient}><App /></QueryClientProvider>
+  </StrictMode>,
+);
+
+// web/index.html — set up the root + fonts before main.tsx.
+`,
+  },
+
+  {
+    id: 'shadcn-style-button-input-card',
+    title: 'shadcn-style primitives: Button, Input, Card via class-variance-authority',
+    tags: ['fullstack_app', 'multi_tenant_saas', 'internal_tool'],
+    purpose:
+      'Three reusable UI primitives modeled on shadcn/ui. Class-variance-authority drives variant composition; clsx merges classNames. Argo ships these by default so frontend code looks like a 2026 product, not a Bootstrap demo.',
+    hintedPath: 'web/components/ui/Button.tsx',
+    language: 'ts',
+    body: `// web/lib/utils.ts
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+export const cn = (...inputs: ClassValue[]) => twMerge(clsx(inputs));
+
+// web/components/ui/Button.tsx
+import { cva, type VariantProps } from 'class-variance-authority';
+import { forwardRef } from 'react';
+import { cn } from '@/web/lib/utils.js';
+
+const button = cva(
+  'inline-flex items-center justify-center rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50 disabled:pointer-events-none',
+  {
+    variants: {
+      intent: {
+        primary: 'bg-accent text-bg hover:opacity-90',
+        secondary: 'border border-text/10 text-text hover:bg-surface',
+        ghost: 'text-text hover:bg-surface',
+        danger: 'bg-red-500 text-white hover:bg-red-600',
+      },
+      size: { sm: 'h-8 px-3 text-xs', md: 'h-10 px-4 text-sm', lg: 'h-12 px-6 text-base' },
+    },
+    defaultVariants: { intent: 'primary', size: 'md' },
+  },
+);
+
+export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof button> {}
+
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, intent, size, ...props }, ref) => (
+    <button ref={ref} className={cn(button({ intent, size }), className)} {...props} />
+  ),
+);
+Button.displayName = 'Button';
+
+// web/components/ui/Input.tsx
+import { forwardRef } from 'react';
+import { cn } from '@/web/lib/utils.js';
+export const Input = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
+  ({ className, ...props }, ref) => (
+    <input ref={ref} className={cn(
+      'h-10 w-full rounded-md border border-text/10 bg-surface px-3 text-sm text-text placeholder:text-text/40 focus:outline-none focus:ring-2 focus:ring-accent',
+      className,
+    )} {...props} />
+  ),
+);
+Input.displayName = 'Input';
+
+// web/components/ui/Card.tsx
+import { cn } from '@/web/lib/utils.js';
+export const Card = ({ className, ...p }: React.HTMLAttributes<HTMLDivElement>) =>
+  <div className={cn('rounded-xl border border-text/10 bg-surface p-6', className)} {...p} />;
+`,
+  },
+
+  {
+    id: 'shared-zod-schema-frontend-and-backend',
+    title: 'Shared Zod schema: same validation on the form AND the route',
+    tags: ['fullstack_app', 'every-build'],
+    purpose:
+      'The single biggest reliability win in a full-stack app: the SAME Zod schema validates the form on the client and the request body on the server. Eliminates shape drift forever. Schema lives in schema/shared.js and is imported from both halves.',
+    hintedPath: 'schema/shared.js',
+    language: 'js',
+    body: `// schema/shared.js — imported by BOTH server routes and client form.
+import { z } from 'zod';
+
+export const SubmissionSchema = z.object({
+  name: z.string().min(2).max(120),
+  email: z.string().email(),
+  company: z.string().max(120).optional(),
+  message: z.string().min(20).max(4000),
+});
+export type Submission = z.infer<typeof SubmissionSchema>;
+
+// routes/form.js — server side
+import { SubmissionSchema } from '../schema/shared.js';
+export async function registerFormRoutes(app) {
+  app.post('/submissions', async (request, reply) => {
+    const parsed = SubmissionSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
+    // ...persist + queue mailer
+    return reply.code(202).send({ submissionId: crypto.randomUUID() });
+  });
+}
+
+// web/components/MainForm.tsx — client side, SAME schema
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { SubmissionSchema, type Submission } from '../../schema/shared.js';
+import { Button, Input } from './ui/index.js';
+
+export function MainForm() {
+  const { register, handleSubmit, formState: { errors, isSubmitting } } =
+    useForm<Submission>({ resolver: zodResolver(SubmissionSchema) });
+  const onSubmit = handleSubmit(async (data) => {
+    await fetch('/api/submissions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  });
+  return (
+    <form onSubmit={onSubmit} className="space-y-4">
+      <Input placeholder="Name" {...register('name')} />
+      {errors.name && <p className="text-red-400 text-xs">{errors.name.message}</p>}
+      <Input type="email" placeholder="Email" {...register('email')} />
+      {errors.email && <p className="text-red-400 text-xs">{errors.email.message}</p>}
+      <Button disabled={isSubmitting} type="submit">{isSubmitting ? 'Sending…' : 'Send'}</Button>
+    </form>
+  );
+}
+`,
+  },
+
+  {
+    id: 'tanstack-query-typed-fetch-client',
+    title: 'Tanstack Query + typed fetch client with optimistic updates',
+    tags: ['fullstack_app', 'multi_tenant_saas', 'internal_tool'],
+    purpose:
+      'Every server-data interaction in the frontend goes through Tanstack Query. useQuery for reads, useMutation with optimistic updates for writes. The fetch client is typed via the shared Zod schemas so a backend rename breaks the build, not production.',
+    hintedPath: 'web/lib/api.ts',
+    language: 'ts',
+    body: `// web/lib/api.ts
+import { z } from 'zod';
+import { SubmissionSchema, type Submission } from '../../schema/shared.js';
+
+class ApiError extends Error {
+  constructor(public status: number, public code: string, message: string) { super(message); }
+}
+
+async function send<T>(method: 'GET'|'POST'|'PATCH'|'DELETE', path: string, schema: z.ZodSchema<T>, body?: unknown): Promise<T> {
+  const res = await fetch('/api' + path, {
+    method,
+    credentials: 'include',
+    headers: body ? { 'content-type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  const json = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new ApiError(res.status, json?.error ?? 'unknown', json?.message ?? text);
+  return schema.parse(json);
+}
+
+export const api = {
+  listSubmissions: () => send('GET', '/submissions', z.object({ items: z.array(SubmissionSchema) })),
+  createSubmission: (input: Submission) => send('POST', '/submissions', z.object({ id: z.string() }), input),
+};
+
+// web/hooks/useSubmissions.ts
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '../lib/api.js';
+
+export function useSubmissions() {
+  return useQuery({ queryKey: ['submissions'], queryFn: api.listSubmissions });
+}
+
+export function useCreateSubmission() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.createSubmission,
+    onMutate: async (input) => {
+      await qc.cancelQueries({ queryKey: ['submissions'] });
+      const prev = qc.getQueryData(['submissions']);
+      qc.setQueryData(['submissions'], (old: any) => ({
+        items: [...(old?.items ?? []), { ...input, id: 'temp-' + Math.random() }],
+      }));
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => ctx?.prev && qc.setQueryData(['submissions'], ctx.prev),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['submissions'] }),
+  });
+}
+`,
+  },
+
+  {
+    id: 'fastify-static-react-spa',
+    title: 'Fastify serves the Vite-built React SPA with /api/* preserved',
+    tags: ['fullstack_app'],
+    purpose:
+      'How the backend serves the frontend in the same process — a single Blaxel sandbox per operation. Static handler for web/dist/, SPA fallback to index.html for any non-API path so React Router works, /api/* mounts under the existing route registrar. One bundle, one URL.',
+    hintedPath: 'server.js',
+    language: 'js',
+    body: `// server.js — production entrypoint that serves frontend + backend together.
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import Fastify from 'fastify';
+import helmet from '@fastify/helmet';
+import cors from '@fastify/cors';
+import staticPlugin from '@fastify/static';
+import rateLimit from '@fastify/rate-limit';
+import { registerApiRoutes } from './routes/api.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const distPath = path.join(__dirname, 'web', 'dist');
+
+async function main() {
+  const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 4_000_000 });
+  app.get('/health', async () => ({ status: 'ok' }));
+  app.setErrorHandler((err, _req, reply) => {
+    reply.code(err.statusCode ?? 500).send({ error: err.code ?? 'internal_error' });
+  });
+  await app.register(helmet, { global: true, contentSecurityPolicy: false });
+  await app.register(cors, { origin: process.env.WEB_PUBLIC_URL ?? '*', credentials: true });
+  await app.register(rateLimit, { global: false, max: 60, timeWindow: '1 minute' });
+  await registerApiRoutes(app);
+  await app.register(staticPlugin, { root: distPath, prefix: '/', wildcard: false });
+  // SPA fallback: any non-/api, non-/health path falls back to index.html.
+  app.setNotFoundHandler({ preHandler: app.rateLimit() }, (request, reply) => {
+    if (request.url.startsWith('/api/') || request.url.startsWith('/health')) {
+      return reply.code(404).send({ error: 'not_found' });
+    }
+    return reply.sendFile('index.html');
+  });
+  const port = Number(process.env.PORT) || 3000;
+  await app.listen({ port, host: '0.0.0.0' });
+  for (const sig of ['SIGINT','SIGTERM']) process.once(sig, async () => { await app.close(); process.exit(0); });
+}
+main().catch((err) => { console.error('fatal', err); process.exit(1); });
+`,
+  },
+
+  {
+    id: 'react-router-shell-with-suspense',
+    title: 'React Router shell with Suspense + dark mode + toast',
+    tags: ['fullstack_app', 'multi_tenant_saas', 'internal_tool'],
+    purpose:
+      'Top-level App.tsx shell. React Router v6 with lazy-loaded routes, Suspense fallback skeleton, dark/light mode toggle backed by prefers-color-scheme + a class on <html>, sonner-style toast region. The frame every full-stack Argo build extends.',
+    hintedPath: 'web/App.tsx',
+    language: 'ts',
+    body: `// web/App.tsx
+import { lazy, Suspense, useEffect, useState } from 'react';
+import { BrowserRouter, Routes, Route, Link, NavLink } from 'react-router-dom';
+import { Sun, Moon } from 'lucide-react';
+import { Button } from './components/ui/Button.js';
+
+const Home = lazy(() => import('./pages/Home.js'));
+const Submit = lazy(() => import('./pages/Submit.js'));
+const Admin = lazy(() => import('./pages/AdminDashboard.js'));
+
+export default function App() {
+  const [theme, setTheme] = useState<'dark'|'light'>('dark');
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+  }, [theme]);
+  return (
+    <BrowserRouter>
+      <div className="min-h-screen flex flex-col">
+        <header className="flex items-center justify-between px-6 h-14 border-b border-text/10">
+          <Link to="/" className="font-bold tracking-tight">Argo Operation</Link>
+          <nav className="flex items-center gap-4 text-sm">
+            <NavLink to="/submit" className={({ isActive }) => isActive ? 'text-accent' : ''}>Submit</NavLink>
+            <NavLink to="/admin" className={({ isActive }) => isActive ? 'text-accent' : ''}>Admin</NavLink>
+            <Button intent="ghost" size="sm" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
+              {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </Button>
+          </nav>
+        </header>
+        <main className="flex-1">
+          <Suspense fallback={<div className="p-12 text-center text-text/40">Loading…</div>}>
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/submit" element={<Submit />} />
+              <Route path="/admin" element={<Admin />} />
+            </Routes>
+          </Suspense>
+        </main>
+        <footer className="border-t border-text/10 py-6 text-center text-xs text-text/40">
+          Powered by Argo · operates from email
+        </footer>
+      </div>
+    </BrowserRouter>
+  );
+}
+`,
+  },
 ];
 
 /**

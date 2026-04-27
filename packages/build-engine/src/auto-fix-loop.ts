@@ -3,7 +3,7 @@
 // the model with the structured error report. Up to MAX_CYCLES iterations.
 // This is what makes Argo's output production-ready by default.
 
-import { streamBuild, type Specialist } from '@argo/agent';
+import { streamBuildWithTools, type Specialist, type ToolEvent } from '@argo/agent';
 import type { OperationBundle } from '@argo/workspace-runtime';
 import { applyActionsToFileMap, parseDyadResponse, type ParsedAction } from './dyad-tag-parser.js';
 import { runQualityGate, type QualityReport } from './quality-gate.js';
@@ -45,6 +45,13 @@ export interface AutoFixArgs {
    * emit it inline). Use it to drive a live cost meter.
    */
   onChunk?: (delta: string, fullText: string, totalTokens: number | null) => void;
+  /**
+   * Tool-call lifecycle events surfaced from streamBuildWithTools.
+   * The build engine fires this when the model emits an <argo-tool>
+   * call and again when its result lands. Useful for SSE telemetry
+   * and the build UI's "fetching component from 21st.dev…" hint.
+   */
+  onTool?: (event: ToolEvent) => void;
   /** AbortSignal so the API route can cut the loop. */
   signal?: AbortSignal;
 }
@@ -98,7 +105,7 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
 
     let fullText = '';
     try {
-      for await (const chunk of streamBuild({
+      for await (const chunk of streamBuildWithTools({
         specialist: args.specialist,
         userPrompt,
         ...(args.augmentation
@@ -114,6 +121,7 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
             }
           : {}),
         ...(args.signal ? { signal: args.signal } : {}),
+        ...(args.onTool ? { onTool: args.onTool } : {}),
       })) {
         if (chunk.delta && args.onChunk) args.onChunk(chunk.delta, chunk.fullText, chunk.totalTokens);
         fullText = chunk.fullText;

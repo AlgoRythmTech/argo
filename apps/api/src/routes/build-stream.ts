@@ -36,6 +36,7 @@ const Body = z.object({
       'data_pipeline',
       'search_service',
       'internal_tool',
+      'fullstack_app',
       'generic',
     ])
     .optional(),
@@ -165,6 +166,9 @@ export async function registerBuildStreamRoutes(app: FastifyInstance) {
         onChunk: (delta, _full, totalTokens) => {
           writeEvent('chunk', { delta });
           maybeEmitTokenTick(totalTokens);
+        },
+        onTool: (evt) => {
+          writeEvent('tool', evt);
         },
         onCycle: (evt: AutoFixCycleEvent) => {
           if (evt.kind === 'actions_parsed') {

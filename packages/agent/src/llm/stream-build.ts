@@ -10,6 +10,8 @@ import {
   recallRelevantMemories,
   renderMemoriesAsPromptSection,
 } from '../supermemory/context-augment.js';
+import { findToolCalls, replaceToolCallsWithResults } from '../tools/tool-call-parser.js';
+import { runToolCall } from '../tools/run-tool-call.js';
 
 export interface StreamBuildArgs {
   specialist: Specialist;
@@ -234,4 +236,107 @@ function unique(values: string[]): string[] {
     out.push(v);
   }
   return out;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Tool-call wrapper.
+//
+// streamBuildWithTools drives streamBuild for one "round," then scans
+// the fullText for <argo-tool> calls. If any are found, it runs them,
+// appends the results to a follow-up user message, and runs streamBuild
+// again. Two rounds max so a chatty model can't loop forever.
+//
+// All chunks from every round are yielded to the consumer; the consumer
+// (auto-fix-loop) only sees a continuous stream of building output.
+// ──────────────────────────────────────────────────────────────────────
+
+const MAX_TOOL_ROUNDS = 2;
+
+export interface ToolEvent {
+  kind: 'tool_called' | 'tool_completed';
+  name: string;
+  /** Truthy when the tool returned usable data. */
+  ok?: boolean;
+  /** Short label for telemetry (e.g. "21st.dev:fetch:hero animated"). */
+  label?: string;
+}
+
+export interface StreamBuildWithToolsArgs extends StreamBuildArgs {
+  /** Optional callback fired when a tool starts/completes. */
+  onTool?: (event: ToolEvent) => void;
+  /** Override the default 2-round cap. Hard-clamped to [0, 4]. */
+  maxToolRounds?: number;
+}
+
+export async function* streamBuildWithTools(
+  args: StreamBuildWithToolsArgs,
+): AsyncGenerator<StreamBuildChunk> {
+  const cap = Math.max(0, Math.min(4, args.maxToolRounds ?? MAX_TOOL_ROUNDS));
+
+  // Accumulator across rounds — each follow-up round is fed the prior
+  // round's text with tool results spliced in so the model can read what
+  // came back.
+  let augmentedUserPrompt = args.userPrompt;
+  let priorRoundsContext = '';
+
+  for (let round = 0; round <= cap; round++) {
+    let roundFullText = '';
+    let lastChunk: StreamBuildChunk | null = null;
+
+    const callArgs: StreamBuildArgs = {
+      ...args,
+      userPrompt: augmentedUserPrompt,
+      ...(priorRoundsContext
+        ? { context: [args.context, priorRoundsContext].filter(Boolean).join('\n\n') }
+        : {}),
+    };
+
+    for await (const chunk of streamBuild(callArgs)) {
+      yield chunk;
+      roundFullText = chunk.fullText;
+      lastChunk = chunk;
+      if (chunk.aborted) return;
+    }
+    if (!lastChunk) return;
+
+    // No more tool rounds allowed → finish.
+    if (round === cap) return;
+
+    const calls = findToolCalls(roundFullText);
+    if (calls.length === 0) return;
+
+    // Execute each tool call. Cap at 4 per round so a runaway response
+    // can't fan out across the whole allowlist.
+    const toExecute = calls.slice(0, 4);
+    const resultByRaw = new Map<string, string>();
+    for (const call of toExecute) {
+      args.onTool?.({ kind: 'tool_called', name: call.name });
+      const exec = await runToolCall(call, { ...(args.signal ? { signal: args.signal } : {}) });
+      args.onTool?.({
+        kind: 'tool_completed',
+        name: call.name,
+        ok: exec.ok,
+        label: exec.label,
+      });
+      resultByRaw.set(call.raw, exec.rendered);
+    }
+
+    // Build the follow-up prompt: tell the model what it called, what
+    // came back, and ask it to continue producing the build with the
+    // new info — same tag rules apply.
+    const substituted = replaceToolCallsWithResults(roundFullText, resultByRaw);
+    priorRoundsContext = [
+      `# Previous round (round ${round + 1} of up to ${cap + 1})`,
+      'You called tools below. Their results are inlined where the tags were.',
+      'Continue the build using these results — emit the remaining <dyad-write> blocks now.',
+      'Do NOT re-emit any <dyad-write> blocks you already produced in the prior round.',
+      '',
+      substituted,
+    ].join('\n');
+
+    augmentedUserPrompt =
+      'Continue the build with the tool results above incorporated. ' +
+      'Emit the remaining files needed to satisfy the brief. ' +
+      'Final response should still end with exactly one <dyad-chat-summary>.';
+  }
 }
