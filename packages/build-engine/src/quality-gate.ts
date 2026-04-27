@@ -46,7 +46,16 @@ export type QualityCheckId =
   | 'mongo_collection_has_indexes'
   | 'route_sets_content_type'
   | 'no_exposed_stack_traces'
-  | 'request_logger_in_handlers';
+  | 'request_logger_in_handlers'
+  // ── v4 hardening (Day 4 part 20): documentation, env, agent SDK ──
+  | 'readme_with_architecture_diagram'
+  | 'env_example_documents_every_var'
+  | 'eval_suite_present_when_llm_used'
+  | 'no_dotenv_import_in_production_code'
+  | 'no_unhandled_zod_safe_parse'
+  | 'no_async_in_top_level_route_handlers_without_try'
+  | 'agent_sdk_used_when_llm_called'
+  | 'mailer_uses_escape_for_email';
 
 export interface QualityIssue {
   check: QualityCheckId;
@@ -103,6 +112,17 @@ export function runQualityGate(bundle: OperationBundle): QualityReport {
   issues.push(...checkBodyLimitSet(bundle));
   issues.push(...checkFastifyErrorHandler(bundle));
   issues.push(...checkMongoIndexes(bundle));
+  // v4 hardening — documentation + agent SDK invariants
+  issues.push(...checkReadmeArchitectureDiagram(bundle));
+  issues.push(...checkEnvExampleCoverage(bundle));
+  issues.push(...checkEvalSuitePresentWhenLlmUsed(bundle));
+  issues.push(...checkAgentSdkUsedWhenLlmCalled(bundle));
+  issues.push(...checkMailerUsesEscape(bundle));
+  for (const file of bundle.files) {
+    issues.push(...checkNoDotenvImport(file));
+    issues.push(...checkNoUnhandledZodSafeParse(file));
+    issues.push(...checkAsyncRouteHandlersHaveErrorBoundary(file));
+  }
 
   const errorCount = issues.filter((i) => i.severity === 'error').length;
   const warnCount = issues.filter((i) => i.severity === 'warn').length;
@@ -807,6 +827,259 @@ function checkPublicRoutesHaveRateLimit(bundle: OperationBundle): QualityIssue[]
     }
   }
   return out;
+}
+
+// ── v4 hardening: documentation + agent SDK invariants ───────────────
+
+/**
+ * README.md must exist AND contain a fenced mermaid block (the
+ * BUILD_SYSTEM_PROMPT v2 mandate). Even fullstack apps need this — the
+ * mermaid is the diagram a non-engineer reviewer sees first.
+ */
+function checkReadmeArchitectureDiagram(bundle: OperationBundle): QualityIssue[] {
+  // Trivial bundles (sub-5 files, e.g. health-only stubs) are exempt —
+  // the README mandate is for real production builds.
+  if (bundle.files.length < 5) return [];
+  const readme = bundle.files.find((f) => f.path === 'README.md' || f.path === 'readme.md');
+  if (!readme) {
+    return [{
+      check: 'readme_with_architecture_diagram',
+      severity: 'warn',
+      file: 'README.md',
+      line: null,
+      message: 'README.md is missing. Every Argo bundle ships a README with a plain-English summary + a mermaid architecture diagram.',
+    }];
+  }
+  if (!/```mermaid[\s\S]+?```/i.test(readme.contents)) {
+    return [{
+      check: 'readme_with_architecture_diagram',
+      severity: 'warn',
+      file: readme.path,
+      line: 1,
+      message: 'README.md exists but is missing a ```mermaid``` fenced block. Add one showing routes -> handlers -> services so a reviewer can read the architecture in 10 seconds.',
+    }];
+  }
+  return [];
+}
+
+/**
+ * .env.example must exist AND every env var process.env.<X> referenced
+ * in code must be documented (i.e. appear as a key on its own line).
+ */
+function checkEnvExampleCoverage(bundle: OperationBundle): QualityIssue[] {
+  // Trivial bundles are exempt.
+  if (bundle.files.length < 5) return [];
+  const envFile = bundle.files.find((f) => f.path === '.env.example' || f.path === 'env.example');
+  if (!envFile) {
+    return [{
+      check: 'env_example_documents_every_var',
+      severity: 'warn',
+      file: '.env.example',
+      line: null,
+      message: '.env.example is missing. Document every env var the code reads, with an inline comment per var.',
+    }];
+  }
+  const referenced = new Set<string>();
+  const ENV_RE = /process\.env\.([A-Z][A-Z0-9_]*)/g;
+  for (const f of bundle.files) {
+    if (!/\.(?:m?[jt]sx?|cjs)$/i.test(f.path)) continue;
+    let m: RegExpExecArray | null;
+    ENV_RE.lastIndex = 0;
+    while ((m = ENV_RE.exec(f.contents)) !== null) {
+      referenced.add(m[1]!);
+    }
+  }
+  // Implicit always-present env vars Argo's runtime injects — never have
+  // to be documented in .env.example because the operator never sets them.
+  const RUNTIME_INJECTED = new Set([
+    'NODE_ENV', 'PORT', 'LOG_LEVEL', 'TZ',
+    'ARGO_OPERATION_ID', 'ARGO_ENVIRONMENT', 'ARGO_CONTROL_PLANE_URL',
+    'ARGO_TEST_MODE', 'ARGO_OWNER_ID',
+  ]);
+  const missing: string[] = [];
+  for (const name of referenced) {
+    if (RUNTIME_INJECTED.has(name)) continue;
+    const declared = new RegExp(`^\\s*${name}\\s*=`, 'm').test(envFile.contents);
+    if (!declared) missing.push(name);
+  }
+  if (missing.length === 0) return [];
+  return [{
+    check: 'env_example_documents_every_var',
+    severity: 'warn',
+    file: envFile.path,
+    line: null,
+    message: `.env.example does not document: ${missing.join(', ')}. Add a key=placeholder line for each (with a one-line comment describing what it's for).`,
+  }];
+}
+
+/**
+ * If any code file imports an LLM SDK, openai client, or hits the
+ * /chat/completions endpoint, then tests/eval-suite.js MUST exist.
+ * No LLM-using app ships untested.
+ */
+function checkEvalSuitePresentWhenLlmUsed(bundle: OperationBundle): QualityIssue[] {
+  const usesLlm = bundle.files.some((f) => {
+    if (!/\.(?:m?[jt]sx?|cjs)$/i.test(f.path)) return false;
+    return /(\bopenai\b|chat\/completions|anthropic\.com|claude-|@anthropic-ai)/i.test(f.contents);
+  });
+  if (!usesLlm) return [];
+  const hasEval = bundle.files.some((f) =>
+    f.path === 'tests/eval-suite.js' || f.path === 'tests/eval-suite.mjs' || f.path === 'tests/eval.test.js',
+  );
+  if (hasEval) return [];
+  return [{
+    check: 'eval_suite_present_when_llm_used',
+    severity: 'error',
+    file: 'tests/eval-suite.js',
+    line: null,
+    message: 'This bundle calls an LLM but ships no tests/eval-suite.js. LLM-using code without an eval suite is untestable. Add the spec-as-tests harness (see reference snippet agent-eval-suite).',
+  }];
+}
+
+/**
+ * No file should `import 'dotenv'` or `require('dotenv')`. Argo's
+ * runtime sets env vars via Blaxel sandbox metadata; dotenv is a dev
+ * artifact that leaks `.env` files when copied.
+ */
+function checkNoDotenvImport(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(?:m?[jt]sx?|cjs)$/i.test(f.path)) return [];
+  const lines = f.contents.split('\n');
+  const issues: QualityIssue[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (/(?:^|\b)import\s+(?:[*\w{},\s]+\s+from\s+)?['"]dotenv(?:\/[^'"]+)?['"]/.test(line) ||
+        /require\(\s*['"]dotenv(?:\/[^'"]+)?['"]\s*\)/.test(line)) {
+      issues.push({
+        check: 'no_dotenv_import_in_production_code',
+        severity: 'error',
+        file: f.path,
+        line: i + 1,
+        message: 'dotenv is forbidden in generated code. Argo injects env via Blaxel sandbox metadata; reading process.env directly is enough.',
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * `.safeParse(...)` results must be checked. A bare safeParse result
+ * that's never read is a guarantee of a runtime crash later.
+ */
+function checkNoUnhandledZodSafeParse(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(?:m?[jt]sx?|cjs)$/i.test(f.path)) return [];
+  const lines = f.contents.split('\n');
+  const issues: QualityIssue[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    // Only flag when safeParse appears as a bare expression statement
+    // (no const/let/var binding, no `if (...)`, no `?` chain consumer).
+    const m = /^\s*\w+\.safeParse\s*\(/.exec(line);
+    if (m && !/^\s*(const|let|var|if|return|await|throw|export|=>)/.test(line)) {
+      issues.push({
+        check: 'no_unhandled_zod_safe_parse',
+        severity: 'error',
+        file: f.path,
+        line: i + 1,
+        message: 'safeParse() result is not assigned or checked. Either bind to a variable and check .success, or use .parse() to throw on invalid input.',
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * Every async route handler should either be inside a try/catch or
+ * the file should have a Fastify setErrorHandler somewhere — otherwise
+ * unhandled rejections produce 500s with stack traces in the response.
+ */
+function checkAsyncRouteHandlersHaveErrorBoundary(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(?:m?[jt]sx?|cjs)$/i.test(f.path)) return [];
+  if (!/app\.(get|post|put|patch|delete)\s*\(/.test(f.contents)) return [];
+  // Fastify v4 auto-handles rejections IF setErrorHandler is registered.
+  // We accept either: an explicit try/catch in the handler, OR a
+  // setErrorHandler in the same file or in any other file in the bundle.
+  // The bundle-wide setErrorHandler check (checkFastifyErrorHandler)
+  // catches the latter case; here we only flag handlers that are
+  // ARROW functions with NO try and NO outer error handler in the file.
+  const lines = f.contents.split('\n');
+  const issues: QualityIssue[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    // async (req, reply) => { followed by no try/catch in the next ~15 lines
+    if (/async\s*\([^)]*\)\s*=>\s*\{/.test(line)) {
+      const block = lines.slice(i, Math.min(lines.length, i + 25)).join('\n');
+      const hasTry = /\btry\s*\{/.test(block);
+      const fileHasErrorHandler = /setErrorHandler/.test(f.contents);
+      if (!hasTry && !fileHasErrorHandler) {
+        issues.push({
+          check: 'no_async_in_top_level_route_handlers_without_try',
+          severity: 'warn',
+          file: f.path,
+          line: i + 1,
+          message: 'Async route handler with no try/catch and no setErrorHandler in this file. Wrap in try/catch or rely on a bundle-wide setErrorHandler — but make sure one exists.',
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+/**
+ * If LLM endpoints are called raw (chat/completions), the agent SDK
+ * snippet wasn't used. Flag as warn so the agent SDK pattern is the
+ * default. Errors-only bypass when the file is the SDK itself.
+ */
+function checkAgentSdkUsedWhenLlmCalled(bundle: OperationBundle): QualityIssue[] {
+  const sdkPaths = new Set([
+    'lib/agent/index.js',
+    'lib/agent/index.ts',
+    'agent/index.js',
+    'src/agent/index.js',
+  ]);
+  const sdkPresent = bundle.files.some((f) => sdkPaths.has(f.path));
+  if (sdkPresent) return [];
+  // Find raw chat/completions calls outside any /agent/ folder.
+  const issues: QualityIssue[] = [];
+  for (const f of bundle.files) {
+    if (!/\.(?:m?[jt]sx?|cjs)$/i.test(f.path)) continue;
+    if (f.path.includes('/agent/') || f.path.includes('/lib/agent')) continue;
+    if (/chat\/completions|messages.create\(|anthropic\.messages/.test(f.contents)) {
+      issues.push({
+        check: 'agent_sdk_used_when_llm_called',
+        severity: 'warn',
+        file: f.path,
+        line: null,
+        message: 'Raw chat/completions call found, but no lib/agent/index.js exists. Generated apps should call createAgent() from the inline agent SDK instead — gives them retry, schema validation, cost tracking, and replay for free.',
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * Mailer template files must call escapeForEmail() on every interpolated
+ * value. Argo's invariants require this; a generated mailer that
+ * concatenates raw user input is an XSS-into-email-clients waiting room.
+ */
+function checkMailerUsesEscape(bundle: OperationBundle): QualityIssue[] {
+  const mailerFiles = bundle.files.filter((f) =>
+    /(^|\/)(mailer|email)\/.*\.(m?js|ts)$/i.test(f.path) &&
+    !/templates?\.test|\.test\./i.test(f.path),
+  );
+  const issues: QualityIssue[] = [];
+  for (const f of mailerFiles) {
+    if (!/\$\{[^}]+\}/.test(f.contents)) continue;            // no interpolation, no risk
+    if (!/escapeForEmail|escapeHtml|sanitize/i.test(f.contents)) {
+      issues.push({
+        check: 'mailer_uses_escape_for_email',
+        severity: 'error',
+        file: f.path,
+        line: null,
+        message: 'Mailer template interpolates values but never calls escapeForEmail(). Wrap every ${...} in escapeForEmail() — cribbing user input straight into HTML email is an XSS risk.',
+      });
+    }
+  }
+  return issues;
 }
 
 // ── Auto-fix prompt composer ───────────────────────────────────────────

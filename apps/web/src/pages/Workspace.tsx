@@ -25,6 +25,7 @@ import { SpendBadge } from '../components/SpendBadge.js';
 import { OperationReadmeButton } from '../components/OperationReadmeButton.js';
 import { HealthBadge } from '../components/HealthBadge.js';
 import { WorkspaceEmptyState } from '../components/WorkspaceEmptyState.js';
+import { EmailPreviewModal } from '../components/EmailPreviewModal.js';
 import { cn } from '../lib/utils.js';
 
 type BuilderState =
@@ -270,6 +271,7 @@ export function Workspace() {
             {activeOp && <HealthBadge operationId={activeOp.id} />}
             {activeOp && <SpendBadge operationId={activeOp.id} />}
             {activeOp && <OperationReadmeButton operationId={activeOp.id} />}
+            {activeOp && <EmailPreviewModal {...(activeOp.name ? { operationName: activeOp.name } : {})} />}
           </div>
           <div className="flex items-center gap-2">
             {activeOp?.publicUrl && (

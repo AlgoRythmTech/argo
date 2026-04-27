@@ -265,4 +265,120 @@ process.on('SIGTERM',()=>{});`,
     expect(r.autoFixPrompt).toContain('# Quality gate failed');
     expect(r.autoFixPrompt).toContain('package.json');
   });
+
+  // ── v4 hardening checks ─────────────────────────────────────────────
+
+  it('flags dotenv import in production code', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents:
+            "// argo:scaffolding\nimport 'dotenv/config';\nrequire('node:http').createServer().listen(3000,'0.0.0.0');\nprocess.on('SIGTERM',()=>{});",
+          argoGenerated: false,
+        },
+      ]),
+    );
+    expect(r.issues.some((i) => i.check === 'no_dotenv_import_in_production_code')).toBe(true);
+  });
+
+  it('flags eval-suite missing when an LLM is called', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents:
+            "// argo:scaffolding\nrequire('node:http').createServer().listen(3000,'0.0.0.0');\nprocess.on('SIGTERM',()=>{});",
+          argoGenerated: false,
+        },
+        {
+          path: 'routes/agent.js',
+          contents:
+            "// argo:generated\nimport { request } from 'undici';\nawait request('https://api.openai.com/v1/chat/completions', { method: 'POST' });",
+          argoGenerated: true,
+        },
+      ]),
+    );
+    expect(r.issues.some((i) => i.check === 'eval_suite_present_when_llm_used')).toBe(true);
+  });
+
+  it('does NOT flag eval-suite missing when there is no LLM call', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents:
+            "// argo:scaffolding\nrequire('node:http').createServer().listen(3000,'0.0.0.0');\nprocess.on('SIGTERM',()=>{});",
+          argoGenerated: false,
+        },
+      ]),
+    );
+    expect(r.issues.some((i) => i.check === 'eval_suite_present_when_llm_used')).toBe(false);
+  });
+
+  it('flags an unhandled .safeParse() expression statement', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents:
+            "// argo:scaffolding\nrequire('node:http').createServer().listen(3000,'0.0.0.0');\nprocess.on('SIGTERM',()=>{});",
+          argoGenerated: false,
+        },
+        {
+          path: 'routes/items.js',
+          contents:
+            "// argo:generated\nimport { Schema } from '../schema/items.js';\nfunction handler(req) {\n  Schema.safeParse(req.body);\n  return { ok: true };\n}",
+          argoGenerated: true,
+        },
+      ]),
+    );
+    expect(r.issues.some((i) => i.check === 'no_unhandled_zod_safe_parse')).toBe(true);
+  });
+
+  it('flags a mailer template that interpolates without escaping', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents:
+            "// argo:scaffolding\nrequire('node:http').createServer().listen(3000,'0.0.0.0');\nprocess.on('SIGTERM',()=>{});",
+          argoGenerated: false,
+        },
+        {
+          path: 'mailer/templates.js',
+          contents:
+            "// argo:generated\nexport function reject(s) { return `<p>Hi ${s.name},</p><p>Sorry: ${s.reason}</p>`; }",
+          argoGenerated: true,
+        },
+      ]),
+    );
+    expect(r.issues.some((i) => i.check === 'mailer_uses_escape_for_email')).toBe(true);
+  });
+
+  it('does NOT flag a mailer template that calls escapeForEmail', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents:
+            "// argo:scaffolding\nrequire('node:http').createServer().listen(3000,'0.0.0.0');\nprocess.on('SIGTERM',()=>{});",
+          argoGenerated: false,
+        },
+        {
+          path: 'mailer/templates.js',
+          contents:
+            "// argo:generated\nimport { escapeForEmail } from '../security/escape.js';\nexport function reject(s) { return `<p>Hi ${escapeForEmail(s.name)},</p>`; }",
+          argoGenerated: true,
+        },
+      ]),
+    );
+    expect(r.issues.some((i) => i.check === 'mailer_uses_escape_for_email')).toBe(false);
+  });
 });

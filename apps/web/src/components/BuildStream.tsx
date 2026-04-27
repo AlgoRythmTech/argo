@@ -708,16 +708,80 @@ function ArchitectCard({
         </details>
       )}
       {plan.mermaid && (
-        <details className="px-3.5 py-2">
+        <details open className="px-3.5 py-2">
           <summary className="text-[11px] uppercase tracking-widest text-argo-textSecondary font-mono cursor-pointer hover:text-argo-text">
-            Architecture diagram (mermaid source)
+            Architecture diagram
           </summary>
-          <pre className="mt-2 text-[10px] font-mono text-argo-textSecondary bg-argo-bg/40 border border-argo-border/40 rounded p-2 overflow-x-auto">
-            {plan.mermaid}
-          </pre>
+          <MermaidDiagram source={plan.mermaid} />
         </details>
       )}
     </motion.div>
+  );
+}
+
+function MermaidDiagram({ source }: { source: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { default: mermaid } = await import('mermaid');
+        // Initialise once with the Argo theme — re-init is idempotent.
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: 'dark',
+          fontFamily: 'Inter, system-ui, sans-serif',
+          themeVariables: {
+            background: '#0a0a0b',
+            primaryColor: '#0a0a0b',
+            primaryTextColor: '#f2f0eb',
+            primaryBorderColor: 'rgba(0,229,204,0.4)',
+            lineColor: 'rgba(0,229,204,0.5)',
+            secondaryColor: '#121214',
+            tertiaryColor: '#0a0a0b',
+            mainBkg: '#121214',
+            edgeLabelBackground: '#0a0a0b',
+            clusterBkg: '#121214',
+            clusterBorder: 'rgba(255,255,255,0.1)',
+          },
+        });
+        const id = 'argo-mermaid-' + Math.random().toString(36).slice(2, 9);
+        const { svg } = await mermaid.render(id, source);
+        if (cancelled) return;
+        if (ref.current) {
+          ref.current.innerHTML = svg;
+          // Make the SVG scale to its container.
+          const svgEl = ref.current.querySelector('svg');
+          if (svgEl) {
+            svgEl.removeAttribute('height');
+            svgEl.style.maxWidth = '100%';
+            svgEl.style.height = 'auto';
+          }
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setError(String((err as Error)?.message ?? err).slice(0, 200));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [source]);
+
+  if (error) {
+    return (
+      <div className="mt-2">
+        <div className="text-[11px] text-argo-amber font-mono mb-2">Mermaid render failed: {error}</div>
+        <pre className="text-[10px] font-mono text-argo-textSecondary bg-argo-bg/40 border border-argo-border/40 rounded p-2 overflow-x-auto">
+          {source}
+        </pre>
+      </div>
+    );
+  }
+  return (
+    <div
+      ref={ref}
+      className="mt-3 rounded-md bg-argo-bg/40 border border-argo-border/40 p-3 overflow-x-auto"
+    />
   );
 }
 
