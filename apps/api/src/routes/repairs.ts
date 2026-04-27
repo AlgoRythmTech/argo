@@ -94,6 +94,80 @@ export async function registerRepairsRoutes(app: FastifyInstance) {
 
     return reply.type('text/html').send(htmlOk());
   });
+
+  /**
+   * POST /api/repairs/:id/decision
+   *
+   * In-workspace decision endpoint. The Repair Review page uses this
+   * (session-authed); the email-link path above is for unauthenticated
+   * one-tap-from-email approvals. Both paths converge on the same Mongo
+   * state and same downstream worker.
+   */
+  app.post('/api/repairs/:id/decision', async (request, reply) => {
+    const session = requireSession(request, reply);
+    if (!session) return;
+    const id = String((request.params as { id: string }).id);
+    const decision = String((request.body as { decision?: string } | null)?.decision ?? '').toLowerCase();
+    if (decision !== 'approve' && decision !== 'reject') {
+      return reply.code(400).send({ error: 'invalid_decision', allowed: ['approve', 'reject'] });
+    }
+
+    const { db } = await getMongo();
+    const repair = await db.collection('operation_repairs').findOne({ id });
+    if (!repair) return reply.code(404).send({ error: 'not_found' });
+
+    const op = await getPrisma().operation.findFirst({
+      where: { id: String(repair.operationId), ownerId: session.userId },
+    });
+    if (!op) return reply.code(403).send({ error: 'forbidden' });
+    if (repair.status !== 'awaiting_approval') {
+      return reply.code(409).send({ error: 'already_actioned', status: repair.status });
+    }
+
+    const nextStatus = decision === 'approve' ? 'approved' : 'rejected';
+    const stamp = new Date().toISOString();
+    await db.collection('operation_repairs').updateOne(
+      { id },
+      {
+        $set: {
+          status: nextStatus,
+          [decision === 'approve' ? 'approvedAt' : 'rejectedAt']: stamp,
+          decidedBy: session.userId,
+          decidedVia: 'workspace',
+        },
+      },
+    );
+
+    const activity = await appendActivity({
+      ownerId: op.ownerId,
+      operationId: op.id,
+      operationName: op.name,
+      kind: decision === 'approve' ? 'repair_approved' : 'repair_rejected',
+      message:
+        decision === 'approve'
+          ? 'Repair approved from the workspace — applying.'
+          : 'Repair rejected from the workspace — change discarded.',
+    });
+    broadcastToOwner(op.ownerId, { type: 'activity', payload: activity });
+
+    if (decision === 'approve') {
+      // Same memory write as the email-link path.
+      const failureKind = String(repair.failureKind ?? 'unknown');
+      const whatChanged = String(repair.whatChanged ?? '').slice(0, 240);
+      if (whatChanged) {
+        await rememberDecision({
+          ownerId: op.ownerId,
+          operationId: op.id,
+          kind: 'workflow_decision',
+          content: `Approved repair on "${op.name}" (${failureKind}): ${whatChanged}`,
+          tags: ['repair-approved', 'workspace', failureKind],
+        }).catch(() => undefined);
+      }
+    }
+
+    logger.info({ repairId: id, decision, userId: session.userId }, 'repair decision via workspace');
+    return reply.send({ ok: true, status: nextStatus });
+  });
 }
 
 const htmlOk = () => `<!doctype html><html><body style="margin:0;padding:48px 16px;font:16px/1.5 system-ui;background:#0a0a0b;color:#f2f0eb;text-align:center"><div style="max-width:480px;margin:0 auto"><div style="font-size:48px;margin-bottom:24px;color:#00e5cc">✓</div><h1 style="margin:0 0 12px;font-size:24px">Repair approved.</h1><p style="margin:0;color:#8a8480">Argo will deploy the change in the next 90 seconds. You'll get a confirmation email when it's live.</p></div></body></html>`;

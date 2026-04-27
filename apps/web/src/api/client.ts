@@ -351,6 +351,8 @@ export const activity = {
 export const repairs = {
   list: () => api.get<unknown[]>('/api/repairs'),
   get: (id: string) => api.get<unknown>(`/api/repairs/${id}`),
+  decide: (id: string, decision: 'approve' | 'reject') =>
+    api.post<{ ok: true; status: string }>(`/api/repairs/${id}/decision`, { decision }),
 };
 
 export const dev = {

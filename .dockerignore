@@ -1,0 +1,36 @@
+# Keep secrets out of the image at all costs.
+.env
+.env.*
+!.env.example
+
+# Local node_modules — pnpm install in the image will produce its own.
+node_modules
+**/node_modules
+.pnpm-store
+**/.pnpm-store
+
+# Build artifacts — regenerated in the image.
+dist
+**/dist
+.next
+**/.next
+.argo
+**/.argo
+
+# IDE + git noise.
+.git
+.gitignore
+.vscode
+.idea
+.cursor
+.DS_Store
+.claude
+
+# Test snapshots, logs.
+**/*.log
+coverage
+**/coverage
+.cache
+
+# Source maps from the web build (huge, not needed at runtime).
+**/*.map

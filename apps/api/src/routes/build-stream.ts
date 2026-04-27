@@ -184,6 +184,15 @@ export async function registerBuildStreamRoutes(app: FastifyInstance) {
               warnCount: evt.report.warnCount,
               issues: evt.report.issues.slice(0, 25),
             });
+          } else if (evt.kind === 'testing_run') {
+            writeEvent('testing', {
+              cycle: evt.cycle,
+              passed: evt.report.passed,
+              booted: evt.report.booted,
+              durationMs: evt.report.durationMs,
+              routesExercised: evt.report.routesExercised,
+              failures: evt.report.failures.slice(0, 12),
+            });
           } else if (evt.kind === 'cycle_start') {
             writeEvent('cycle_start', { cycle: evt.cycle, promptLength: evt.promptLength });
           } else if (evt.kind === 'cycle_complete') {

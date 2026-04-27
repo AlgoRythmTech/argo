@@ -1,0 +1,142 @@
+# ================================================================
+# Argo full-stack docker-compose.
+#
+# Single command to bring up everything Argo needs:
+#   docker compose up
+#
+# Services:
+#   postgres :5432  — operations metadata, billing, sessions (Prisma)
+#   mongodb  :27017 — generated bundles, briefs, agent invocations
+#   redis    :6379  — BullMQ workers, rate limits, websocket adapter
+#   mailpit  :1025 + :8025 — local SMTP sink so magic links work
+#   api      :4000  — Argo control-plane API (this repo's apps/api)
+#
+# After `docker compose up` succeeds:
+#   1. On the same laptop:    open http://localhost:4000/health
+#   2. On a different laptop: VITE_API_URL=http://<this-laptop-ip>:4000 in .env.local,
+#                             then `pnpm --filter @argo/web dev` to point web at it.
+#
+# Stop:    docker compose down
+# Reset:   docker compose down -v   (wipes data volumes too)
+# ================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: argo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: argo
+      POSTGRES_PASSWORD: argo
+      POSTGRES_DB: argo
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U argo -d argo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mongodb:
+    image: mongo:7
+    container_name: argo-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: argo
+      MONGO_INITDB_ROOT_PASSWORD: argo
+      MONGO_INITDB_DATABASE: argo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+      - ./infra/docker/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: argo-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: argo-mailpit
+    restart: unless-stopped
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI — open this in a browser to read magic-link emails
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8025"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: argo-api
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      mongodb:  { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      mailpit:  { condition: service_healthy }
+    ports:
+      - "4000:4000"
+    env_file:
+      # Mounted from the host. Copy .env.example -> .env.local first.
+      - .env.local
+    environment:
+      # Hard-override the connection strings so the API talks to the
+      # other compose services by hostname, regardless of what's in
+      # .env.local. .env.local is for API keys and tunables; these are
+      # network identity and can't drift.
+      DATABASE_URL: postgresql://argo:argo@postgres:5432/argo?schema=public
+      DIRECT_URL:   postgresql://argo:argo@postgres:5432/argo?schema=public
+      MONGODB_URI:  mongodb://argo:argo@mongodb:27017/argo?authSource=admin
+      MONGODB_DB:   argo
+      REDIS_URL:    redis://redis:6379
+      MAILPIT_SMTP_HOST: mailpit
+      MAILPIT_SMTP_PORT: 1025
+      API_HOST: 0.0.0.0
+      API_PORT: 4000
+    volumes:
+      # Live-reload the source: tsx watch picks up edits immediately.
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+      - ./infra:/app/infra
+      # Keep node_modules in the container (don't shadow with host's).
+      - argo-node-modules:/app/node_modules
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+
+volumes:
+  postgres-data:
+  mongodb-data:
+  redis-data:
+  argo-node-modules:

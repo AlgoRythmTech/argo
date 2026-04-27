@@ -9,6 +9,20 @@ surface the customer ever needs.
 
 ## Quick start
 
+### Option A — Docker (single command, recommended)
+
+```bash
+cp .env.example .env.local                # then edit and add your API keys
+docker compose up -d                       # postgres + mongo + redis + mailpit + api
+docker compose exec api pnpm --filter @argo/api db:deploy   # run migrations once
+pnpm install && pnpm --filter @argo/web dev   # web on localhost:5173
+```
+
+See [QUICKSTART.md](./QUICKSTART.md) for the full walkthrough including the
+"backend on one laptop, frontend on another" setup.
+
+### Option B — Native dev stack
+
 ```bash
 # 1. Copy env template and fill in real keys (rotated, never committed)
 cp .env.example .env.local

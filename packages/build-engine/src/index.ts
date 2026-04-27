@@ -15,3 +15,4 @@ export * from './header.js';
 export * from './dyad-tag-parser.js';
 export * from './quality-gate.js';
 export * from './auto-fix-loop.js';
+export * from './testing-agent.js';

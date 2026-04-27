@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Check, X } from 'lucide-react';
+import { ArrowLeft, Check, Loader2, X } from 'lucide-react';
 import { useArgo } from '../state/store.js';
 import { LiquidButton } from '../components/ui/liquid-glass-button.js';
 import { repairs } from '../api/client.js';
@@ -21,6 +21,8 @@ export function RepairReview() {
   const setView = useArgo((s) => s.setView);
   const [items, setItems] = useState<RepairDoc[]>([]);
   const [active, setActive] = useState<RepairDoc | null>(null);
+  const [pending, setPending] = useState<'approve' | 'reject' | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void repairs.list().then((rows) => {
@@ -28,6 +30,32 @@ export function RepairReview() {
       if ((rows as unknown[]).length > 0) setActive((rows as unknown as RepairDoc[])[0] ?? null);
     });
   }, []);
+
+  const decide = async (decision: 'approve' | 'reject') => {
+    if (!active) return;
+    setPending(decision);
+    setError(null);
+    try {
+      const res = await repairs.decide(active.id, decision);
+      // Optimistically update the active card and the list.
+      setItems((prev) =>
+        prev.map((r) =>
+          r.id === active.id
+            ? { ...r, status: res.status, ...(decision === 'approve' ? { approvedAt: new Date().toISOString() } : {}) }
+            : r,
+        ),
+      );
+      setActive((prev) =>
+        prev && prev.id === active.id
+          ? { ...prev, status: res.status, ...(decision === 'approve' ? { approvedAt: new Date().toISOString() } : {}) }
+          : prev,
+      );
+    } catch (err) {
+      setError(String((err as { message?: string })?.message ?? err).slice(0, 200));
+    } finally {
+      setPending(null);
+    }
+  };
 
   return (
     <div className="argo-desktop-only h-full grid grid-cols-[280px_1fr] bg-argo-bg">
@@ -112,19 +140,60 @@ export function RepairReview() {
               </ul>
             </div>
 
-            <div className="flex gap-3 justify-end">
-              <button
-                type="button"
-                className="inline-flex items-center gap-2 rounded-md border border-argo-border px-4 py-2 text-sm text-argo-textSecondary hover:text-argo-text"
-              >
-                <X className="h-4 w-4" /> Reject and roll back
-              </button>
-              <LiquidButton
-                size="lg"
-                className="bg-argo-accent text-argo-bg font-semibold rounded-md inline-flex items-center gap-2"
-              >
-                <Check className="h-4 w-4" /> Approve repair
-              </LiquidButton>
+            <div className="flex flex-col gap-3 items-end">
+              {error && (
+                <div className="text-xs text-argo-amber font-mono">
+                  {error}
+                </div>
+              )}
+              {(active.status === 'approved' || active.status === 'rejected') ? (
+                <div
+                  className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-mono uppercase tracking-widest ${
+                    active.status === 'approved'
+                      ? 'border border-argo-green/40 bg-argo-green/10 text-argo-green'
+                      : 'border border-argo-textSecondary/40 bg-argo-surface text-argo-textSecondary'
+                  }`}
+                >
+                  {active.status === 'approved' ? (
+                    <>
+                      <Check className="h-4 w-4" /> Approved · deploying
+                    </>
+                  ) : (
+                    <>
+                      <X className="h-4 w-4" /> Rejected · rolled back
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => void decide('reject')}
+                    disabled={pending !== null}
+                    className="inline-flex items-center gap-2 rounded-md border border-argo-border px-4 py-2 text-sm text-argo-textSecondary hover:text-argo-text disabled:opacity-50"
+                  >
+                    {pending === 'reject' ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <X className="h-4 w-4" />
+                    )}
+                    Reject and roll back
+                  </button>
+                  <LiquidButton
+                    size="lg"
+                    onClick={() => void decide('approve')}
+                    disabled={pending !== null}
+                    className="bg-argo-accent text-argo-bg font-semibold rounded-md inline-flex items-center gap-2 disabled:opacity-60"
+                  >
+                    {pending === 'approve' ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Check className="h-4 w-4" />
+                    )}
+                    Approve repair
+                  </LiquidButton>
+                </div>
+              )}
             </div>
           </div>
         )}

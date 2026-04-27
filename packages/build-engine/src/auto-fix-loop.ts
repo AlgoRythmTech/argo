@@ -8,6 +8,7 @@ import type { OperationBundle } from '@argo/workspace-runtime';
 import { applyActionsToFileMap, parseDyadResponse, type ParsedAction } from './dyad-tag-parser.js';
 import { runQualityGate, type QualityReport } from './quality-gate.js';
 import { BundleBuilder } from './bundle-builder.js';
+import { runTestingAgent, renderTestingReportAsAutoFixPrompt, type TestingReport } from './testing-agent.js';
 
 export interface AutoFixArgs {
   specialist: Specialist;
@@ -36,6 +37,15 @@ export interface AutoFixArgs {
   };
   /** Max retry cycles. Default 3 (Section 11 doctrine). */
   maxCycles?: number;
+  /**
+   * When true, after the static gate passes the auto-fix loop ALSO runs
+   * the runtime testing agent (boots the bundle in a child process,
+   * exercises /health and a synthetic POST). Failures are folded back
+   * into the next cycle's re-prompt. Default true; set false for
+   * scenarios where boot would be expensive (e.g. the deterministic
+   * generator path that's already proven).
+   */
+  enableRuntimeTesting?: boolean;
   /** Per-cycle progress callback. */
   onCycle?: (event: AutoFixCycleEvent) => void;
   /**
@@ -60,6 +70,7 @@ export type AutoFixCycleEvent =
   | { kind: 'cycle_start'; cycle: number; promptLength: number }
   | { kind: 'actions_parsed'; cycle: number; actions: ParsedAction[]; prose: string }
   | { kind: 'gate_run'; cycle: number; report: QualityReport }
+  | { kind: 'testing_run'; cycle: number; report: TestingReport }
   | { kind: 'cycle_complete'; cycle: number; passed: boolean }
   | { kind: 'aborted' };
 
@@ -173,15 +184,42 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
     history.push(gateEvt);
     args.onCycle?.(gateEvt);
 
+    // Runtime testing agent: only after the static gate is clean.
+    // Failing the static gate means the bundle isn't even worth booting.
+    let testingReport: TestingReport | null = null;
+    const runtimeTestingEnabled = args.enableRuntimeTesting !== false;
+    if (report.passed && runtimeTestingEnabled) {
+      try {
+        testingReport = await runTestingAgent({ bundle });
+      } catch (err) {
+        // If the testing agent itself crashes, surface that as a
+        // failure but don't block the build — the deploy path will
+        // still gate.
+        testingReport = {
+          passed: false,
+          durationMs: 0,
+          booted: false,
+          routesExercised: [],
+          failures: [
+            { kind: 'boot_failure', message: 'testing agent crashed', tail: String(err).slice(0, 600) },
+          ],
+        };
+      }
+      const testEvt: AutoFixCycleEvent = { kind: 'testing_run', cycle, report: testingReport };
+      history.push(testEvt);
+      args.onCycle?.(testEvt);
+    }
+
+    const cyclePassed = report.passed && (testingReport == null || testingReport.passed);
     const completeEvt: AutoFixCycleEvent = {
       kind: 'cycle_complete',
       cycle,
-      passed: report.passed,
+      passed: cyclePassed,
     };
     history.push(completeEvt);
     args.onCycle?.(completeEvt);
 
-    if (report.passed) {
+    if (cyclePassed) {
       return {
         success: true,
         cycles: cycle,
@@ -196,12 +234,16 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
 
     // Compose the re-prompt for the next cycle. The model receives:
     //   1. The original ask
-    //   2. The current file inventory (paths only, not bodies — keeps tokens low)
-    //   3. The structured error report
+    //   2. The current file inventory (paths only — keeps tokens low)
+    //   3. Static-gate failures
+    //   4. Runtime-testing failures (when present)
     userPrompt = composeRetryPrompt({
       originalPrompt: args.userPrompt,
       currentFiles: Array.from(files.keys()),
       report,
+      ...(testingReport && !testingReport.passed
+        ? { runtimeReport: renderTestingReportAsAutoFixPrompt(testingReport) }
+        : {}),
     });
   }
 
@@ -223,21 +265,36 @@ function composeRetryPrompt(args: {
   originalPrompt: string;
   currentFiles: string[];
   report: QualityReport;
+  /** Optional runtime-test report when the testing agent fired and failed. */
+  runtimeReport?: string;
 }): string {
-  return [
+  const lines: string[] = [
     args.originalPrompt,
     '',
-    '# Previous attempt failed the quality gate. Fix the errors below.',
+    '# Previous attempt failed. Fix the errors below.',
     '',
     `Current files in the project (${args.currentFiles.length}):`,
     ...args.currentFiles.map((p) => `- ${p}`),
     '',
-    args.report.autoFixPrompt,
-    '',
+  ];
+  if (!args.report.passed) {
+    lines.push('## Static quality gate failures');
+    lines.push('');
+    lines.push(args.report.autoFixPrompt);
+    lines.push('');
+  }
+  if (args.runtimeReport) {
+    lines.push('## Runtime testing failures');
+    lines.push('');
+    lines.push(args.runtimeReport);
+    lines.push('');
+  }
+  lines.push(
     'Re-emit ONLY the files that need fixing using <dyad-write>. Do not',
     'touch unrelated files. Each <dyad-write> must contain the FULL new file',
     'contents (no partial diffs). End with one <dyad-chat-summary>.',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 function filesToBundle(
