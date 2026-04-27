@@ -32,7 +32,14 @@ export type TestingFailure =
   | { kind: 'typecheck_failed'; tail: string }
   | { kind: 'unresolved_import'; importPath: string; sourceFile: string }
   | { kind: 'package_json_invalid'; reason: string }
-  | { kind: 'missing_required_file'; path: string };
+  | { kind: 'missing_required_file'; path: string }
+  | {
+      kind: 'spec_criterion_failed';
+      name: string;
+      criterion: string;
+      assertion: string;
+      detail: string;
+    };
 
 export interface TestingReport {
   passed: boolean;
@@ -55,6 +62,27 @@ export interface RunTestingAgentArgs {
   skipFrontendBuild?: boolean;
   /** Optional set of routes to exercise. Defaults derived from common Argo bundles. */
   exerciseRoutes?: Array<{ path: string; method?: 'GET' | 'POST'; payload?: unknown }>;
+  /**
+   * Spec-as-tests. When set, every entry becomes a runtime assertion the
+   * testing agent runs after /health is green. This is where the brief's
+   * successCriteria get folded into the loop: "Strong candidates land in
+   * the hiring client's inbox" → POST a strong-candidate payload, assert
+   * the response decision is 'forward'.
+   */
+  specCriteria?: Array<{
+    name: string;
+    /** The criterion text from the brief, surfaced in the failure report. */
+    criterion: string;
+    /** HTTP request to fire. */
+    request: { path: string; method?: 'GET' | 'POST'; payload?: unknown };
+    /** Assertions to apply to the response. */
+    asserts: Array<
+      | { kind: 'http_status'; expected: number }
+      | { kind: 'http_status_among'; expected: number[] }
+      | { kind: 'response_field_eq'; field: string; expected: unknown }
+      | { kind: 'response_body_contains'; expected: string }
+    >;
+  }>;
 }
 
 const DEFAULT_ROUTES: Array<{ path: string; method: 'GET' | 'POST'; payload?: unknown }> = [
@@ -212,6 +240,53 @@ export async function runTestingAgent(args: RunTestingAgentArgs): Promise<Testin
       }
     }
 
+    // ── Spec-as-tests ────────────────────────────────────────────────
+    // Each successCriterion in the brief becomes a runtime assertion.
+    // This is the difference between "the route returned 2xx" (which we
+    // already check above) and "the route returned the right answer."
+    if (args.specCriteria && args.specCriteria.length > 0) {
+      for (const sc of args.specCriteria) {
+        try {
+          const reqUrl = `${baseUrl}${sc.request.path}`;
+          const res = await request(reqUrl, {
+            method: sc.request.method ?? 'POST',
+            headers: sc.request.payload ? { 'content-type': 'application/json' } : undefined,
+            body: sc.request.payload ? JSON.stringify(sc.request.payload) : undefined,
+            headersTimeout: routeTimeoutMs,
+            bodyTimeout: routeTimeoutMs,
+          });
+          const bodyText = await res.body.text();
+          let bodyJson: Record<string, unknown> | null = null;
+          try {
+            bodyJson = JSON.parse(bodyText);
+          } catch {
+            /* bodyJson stays null — that's fine for body_contains assertions */
+          }
+          for (const a of sc.asserts) {
+            const ok = evaluateSpecAssertion(a, res.statusCode, bodyText, bodyJson);
+            if (!ok.passed) {
+              failures.push({
+                kind: 'spec_criterion_failed',
+                name: sc.name,
+                criterion: sc.criterion,
+                assertion: ok.label,
+                detail: ok.detail,
+              });
+            }
+          }
+          routesExercised.push(`spec:${sc.name} → ${res.statusCode}`);
+        } catch (err) {
+          failures.push({
+            kind: 'spec_criterion_failed',
+            name: sc.name,
+            criterion: sc.criterion,
+            assertion: 'request_failed',
+            detail: String((err as Error)?.message ?? err).slice(0, 200),
+          });
+        }
+      }
+    }
+
     try { child.kill('SIGTERM'); } catch { /* hush */ }
     await sleep(80);
     return {
@@ -224,6 +299,44 @@ export async function runTestingAgent(args: RunTestingAgentArgs): Promise<Testin
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+function evaluateSpecAssertion(
+  a: NonNullable<RunTestingAgentArgs['specCriteria']>[number]['asserts'][number],
+  status: number,
+  bodyText: string,
+  bodyJson: Record<string, unknown> | null,
+): { passed: boolean; label: string; detail: string } {
+  if (a.kind === 'http_status') {
+    return {
+      passed: status === a.expected,
+      label: `http_status=${a.expected}`,
+      detail: `got ${status}`,
+    };
+  }
+  if (a.kind === 'http_status_among') {
+    return {
+      passed: a.expected.includes(status),
+      label: `http_status in [${a.expected.join(',')}]`,
+      detail: `got ${status}`,
+    };
+  }
+  if (a.kind === 'response_field_eq') {
+    const got = bodyJson?.[a.field];
+    return {
+      passed: got === a.expected,
+      label: `response.${a.field} = ${JSON.stringify(a.expected)}`,
+      detail: `got ${JSON.stringify(got)}`,
+    };
+  }
+  if (a.kind === 'response_body_contains') {
+    return {
+      passed: bodyText.includes(a.expected),
+      label: `body contains "${a.expected.slice(0, 40)}"`,
+      detail: bodyText.length > 0 ? `body length ${bodyText.length}` : 'empty body',
+    };
+  }
+  return { passed: false, label: 'unknown_assertion', detail: '' };
 }
 
 /**
@@ -271,12 +384,70 @@ export function renderTestingReportAsAutoFixPrompt(report: TestingReport): strin
         lines.push(`- TYPECHECK FAILED:`);
         lines.push('  ' + f.tail.split('\n').filter(Boolean).slice(-12).join('\n  '));
         break;
+      case 'spec_criterion_failed':
+        lines.push(`- SPEC CRITERION FAILED: "${f.criterion}"`);
+        lines.push(`  Test name: ${f.name}`);
+        lines.push(`  Assertion: ${f.assertion}`);
+        lines.push(`  Detail: ${f.detail}`);
+        lines.push(`  This is a brief.successCriteria entry. The build is "complete" only when this passes.`);
+        break;
     }
   }
   lines.push('');
   lines.push('# Instructions for next iteration');
   lines.push('Fix every failure listed above. Re-emit ONLY the files that change. Do not re-emit files that already pass. End with exactly one <dyad-chat-summary>.');
   return lines.join('\n');
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Spec-as-tests compiler.
+//
+// Turns the operator's brief.successCriteria array (free-text bullets)
+// into a deterministic list of testing-agent specCriteria. Heuristic
+// only — the testing agent runs whatever we give it, and false negatives
+// just mean fewer assertions than we'd like, not a broken build.
+// ──────────────────────────────────────────────────────────────────────
+
+export interface BriefForSpecCompiler {
+  trigger: string;
+  successCriteria: readonly string[];
+  /** Optional: shape of a representative submission. */
+  representativePayload?: Record<string, unknown>;
+}
+
+export function compileSpecCriteria(brief: BriefForSpecCompiler):
+  RunTestingAgentArgs['specCriteria'] {
+  if (!brief.successCriteria || brief.successCriteria.length === 0) return [];
+  const out: NonNullable<RunTestingAgentArgs['specCriteria']> = [];
+  // Form-driven workflows are the most common case. Wire two cases:
+  // a happy-path submission and an invalid-input rejection.
+  if (brief.trigger === 'form_submission') {
+    const happy = brief.representativePayload ?? {
+      name: 'Argo Eval',
+      email: 'eval+happy@argo.run',
+      message: 'A representative submission used to verify success criteria via the testing agent.',
+    };
+    out.push({
+      name: 'happy_path_submission',
+      criterion: brief.successCriteria[0] ?? 'Form submissions are accepted',
+      request: { path: '/submissions', method: 'POST', payload: happy },
+      asserts: [{ kind: 'http_status_among', expected: [200, 201, 202] }],
+    });
+    out.push({
+      name: 'invalid_input_rejected',
+      criterion: 'Invalid input never reaches downstream services.',
+      request: { path: '/submissions', method: 'POST', payload: { ...happy, email: 'not-an-email' } },
+      asserts: [{ kind: 'http_status', expected: 400 }],
+    });
+  }
+  // Health check is a universal criterion.
+  out.push({
+    name: 'health_route',
+    criterion: 'The operation reports its own health on /health.',
+    request: { path: '/health', method: 'GET' },
+    asserts: [{ kind: 'http_status', expected: 200 }],
+  });
+  return out;
 }
 
 // ── helpers ───────────────────────────────────────────────────────────

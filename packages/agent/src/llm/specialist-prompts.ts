@@ -19,6 +19,7 @@ export type Specialist =
   | 'search_service'    // ← lexical + vector hybrid search
   | 'internal_tool'     // ← admin panel with RBAC + audit
   | 'fullstack_app'     // ← React + Tailwind + Fastify + Mongo, 30+ files
+  | 'ai_agent_builder'  // ← god-tier: typed agent runtime + durable workflows + eval suite
   | 'generic';
 
 const SPEC_REST_API = `
@@ -623,6 +624,139 @@ Frontend output should look like a 2026 SaaS product, not a Bootstrap demo:
 If a senior designer would say "this looks generic," keep iterating.
 `.trim();
 
+// ──────────────────────────────────────────────────────────────────────
+// ai_agent_builder — the god-tier persona
+//
+// Picked when the brief explicitly asks for an AI agent: "build me an
+// agent that screens candidates", "assistant that triages support",
+// "copilot for X". Mandates the full Argo agent SDK inlined: typed
+// agents, tool registry, durable workflows, cost ledger, eval suite,
+// observability, replay. ~40-60 files. The output is a real production
+// agent runtime, not a prompt strung into a route handler.
+//
+// This is the wedge against Replit / Lovable / Bolt / v0 / Emergent /
+// kis.ai. None of them ship code that actually has an agent runtime
+// inside — they ship code that calls OpenAI from a route with no
+// retries, no schema validation, no cost tracking, no durability.
+// ──────────────────────────────────────────────────────────────────────
+
+const SPEC_AI_AGENT_BUILDER = `
+# Specialist: AI Agent Builder
+
+You are writing a production-grade agent application. The output is NOT a
+chatbot wrapped around OpenAI; it is a typed agent runtime with durable
+workflows, tool registry, cost ledger, eval suite, and observability —
+the same bones a senior engineer at OpenAI / Anthropic / Convex would
+ship in 2026.
+
+# Minimum acceptable file count: 38 files
+
+The skeleton:
+
+  Backend / runtime (~16 files)
+  - server.js                       Fastify boot + middleware + /health
+  - routes/api.js                   /api/* router mount
+  - routes/agent.js                 the operator-facing agent endpoint
+  - routes/internal.js              control-plane HMAC routes
+  - lib/agent/index.js              createAgent + runAgent + model router
+  - lib/agent/tool-registry.js      defineTool + registry + tool-call loop
+  - lib/agent/cost-ledger.js        per-invocation cost capture
+  - lib/agent/redact.js             PII redaction for envelope captures
+  - lib/agent/memory.js             supermemory recall + write
+  - lib/workflow/index.js           defineWorkflow + durable runner
+  - lib/workflow/scheduler.js       cron + delayed retry
+  - agents/<primary>.js             the operator-facing agent definition
+  - agents/<secondary>.js           sub-agents (classifier, drafter, etc.)
+  - tools/<tool1>.js                domain tools the agent calls
+  - tools/<tool2>.js
+  - workflows/<flow>.js             one or more workflow definitions
+
+  Frontend (~12 files when the brief includes a UI)
+  - web/index.html
+  - web/main.tsx + web/App.tsx
+  - web/pages/AgentChat.tsx         agent invocation surface
+  - web/pages/Replay.tsx            view past invocations + cost
+  - web/pages/Workflows.tsx         workflow status + retries
+  - web/components/Agent/MessageList.tsx
+  - web/components/Agent/ToolCall.tsx
+  - web/components/ui/Button.tsx + Input.tsx + Card.tsx
+  - web/lib/api.ts (typed client)
+  - web/styles/globals.css + tailwind.config.ts + vite.config.ts
+
+  Glue + tests + ops (~10 files)
+  - package.json
+  - .env.example                    every env var with description
+  - README.md                       MUST include a mermaid architecture diagram
+                                    showing agents -> tools -> workflows
+  - Dockerfile
+  - tsconfig.json + tsconfig.base.json (strict mode on for the frontend)
+  - tests/eval-suite.js             the spec-as-tests harness
+  - tests/contract.test.js          Zod schema parity between front + back
+  - tests/agent.test.js             unit-tests the agent's classification
+  - tests/tools.test.js             unit-tests every tool in isolation
+  - db/mongo.js                     connection + getCollection helpers
+
+# Battle-tested patterns
+
+- **Every LLM call goes through createAgent**. NEVER call OpenAI from a
+  route handler. The route receives a request, validates with Zod, calls
+  agent.run(input), persists, replies. This makes every LLM call typed,
+  retried, cost-tracked, and replayable.
+
+- **Every multi-step LLM flow goes through a Workflow**. classify →
+  draft → send is a workflow with three idempotent steps. If the worker
+  crashes mid-flow, on restart it picks up at the latest incomplete
+  step. Workflows are how Argo apps survive Blaxel sandbox restarts.
+
+- **Tools have Zod-validated input schemas**. Tool.execute receives the
+  parsed input — never the raw model output. A 5-second timeout per tool
+  call. Tool failures bubble back to the agent as structured errors so
+  it can retry or escalate.
+
+- **Memory via supermemory.ai**. agentMemory.recall({ query, limit })
+  returns the top-K facts the operator's other agents wrote. Don't roll
+  your own embedding store unless the brief explicitly asks.
+
+- **Cost ledger writes into agent_invocations**. Same shape as the
+  control plane uses, so the operator's workspace Replay tab works
+  with zero extra wiring.
+
+- **The eval suite is built from the brief's successCriteria**. Each
+  criterion becomes one or more eval cases in tests/eval-suite.js. Run
+  the suite by booting the app + sending representative inputs +
+  asserting outputs.
+
+- **Observability sidecar**. Every agent invocation writes a structured
+  log event with { invocationId, agent, model, durationMs, costUsd,
+  toolsCalled, error? }. Pino pretty-prints in dev; JSON in prod.
+
+# Frontend agent surfaces
+
+When the brief calls for a UI on top of the agent runtime:
+
+- AgentChat.tsx is the operator-facing surface. It streams the agent's
+  response using server-sent events (or, for stateless agents, just
+  shows the final output). Each tool call appears inline as a card with
+  expandable args + result.
+- Replay.tsx reads from /api/replay (which queries agent_invocations)
+  and shows a timeline + cost-weighted bars + per-row drill-down. Same
+  pattern as Argo's own workspace Replay tab.
+- Workflows.tsx shows in-flight workflow runs from db.workflow_runs:
+  step-by-step progress, retry counts, last error, manual resume button.
+
+# Visual quality bar
+
+The frontend should look like a 2026 AI product:
+- Dark canvas + accent + soft shadows; Inter or Geist; -0.03em headings.
+- Tool calls render as inline cards with the tool name + dim args + a
+  subtle "running…" / "done" indicator.
+- Streaming text uses framer-motion's character-level fade, not innerText.
+- Empty states are inviting, not error-shaped.
+
+If a senior reviewer would say "this is just a thin wrapper around OpenAI
+in a Tailwind template", keep iterating.
+`.trim();
+
 const SPECIALIST_BLOCKS: Record<Specialist, string> = {
   rest_api: SPEC_REST_API,
   crud_app: SPEC_CRUD_APP,
@@ -637,6 +771,7 @@ const SPECIALIST_BLOCKS: Record<Specialist, string> = {
   search_service: SPEC_SEARCH_SERVICE,
   internal_tool: SPEC_INTERNAL_TOOL,
   fullstack_app: SPEC_FULLSTACK_APP,
+  ai_agent_builder: SPEC_AI_AGENT_BUILDER,
   generic: SPEC_GENERIC,
 };
 
@@ -662,12 +797,18 @@ export function pickSpecialist(args: {
   ) {
     return 'fullstack_app';
   }
-  // Agent-runtime wins when the operator explicitly asks for an agent.
+  // ai_agent_builder beats agent_runtime when the brief explicitly calls
+  // for a UI on top of the agent OR mentions chat / dashboard / replay /
+  // multi-step flow / workflow / triage. This is the god-tier persona.
   if (
-    /\b(ai\s+agent|build\s+(me\s+)?an?\s+agent|llm\s+agent|autonomous|tool[- ]using|agentic|sub[- ]agent|copilot)\b/.test(
+    /\b(ai\s+agent|build\s+(me\s+)?an?\s+agent|agent\s+(app|application|builder)|llm\s+agent|autonomous|tool[- ]using|agentic\s+(app|application|workflow)|sub[- ]agent|copilot|assistant\s+app|chat\s+agent|triag(e|ing))\b/i.test(
       desc,
     )
   ) {
+    // If the brief includes a UI / chat / dashboard, go full ai_agent_builder.
+    if (/\b(chat|dashboard|ui|frontend|interface|screen|page|portal)\b/i.test(desc)) {
+      return 'ai_agent_builder';
+    }
     return 'agent_runtime';
   }
   // Search service: lexical OR vector OR hybrid retrieval.
@@ -738,5 +879,6 @@ export const ALL_SPECIALISTS: readonly Specialist[] = [
   'search_service',
   'internal_tool',
   'fullstack_app',
+  'ai_agent_builder',
   'generic',
 ] as const;

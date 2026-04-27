@@ -6,6 +6,11 @@ import {
   renderFetchAsPromptSection,
   BROWSER_TOOL_ALLOWLIST,
 } from './browser-tool.js';
+import {
+  runSandboxExec,
+  renderSandboxExecAsPromptSection,
+  SANDBOX_EXEC_ALLOWED_BINARIES,
+} from './sandbox-exec-tool.js';
 import { TwentyFirstClient } from './twentyfirst-client.js';
 import type { ToolCall } from './tool-call-parser.js';
 
@@ -18,6 +23,16 @@ export interface ToolExecutionResult {
   label: string;
 }
 
+export interface ToolCallContext {
+  signal?: AbortSignal;
+  /**
+   * Current bundle files keyed by relative path. Populated by the
+   * stream wrapper so sandbox_exec can run against the in-progress
+   * source tree without a separate disk write step.
+   */
+  currentFiles?: ReadonlyMap<string, string>;
+}
+
 let cachedTwentyFirst: TwentyFirstClient | null = null;
 function getTwentyFirst(): TwentyFirstClient {
   if (!cachedTwentyFirst) cachedTwentyFirst = TwentyFirstClient.fromEnv();
@@ -26,7 +41,7 @@ function getTwentyFirst(): TwentyFirstClient {
 
 export async function runToolCall(
   call: ToolCall,
-  ctx: { signal?: AbortSignal } = {},
+  ctx: ToolCallContext = {},
 ): Promise<ToolExecutionResult> {
   switch (call.name) {
     case 'fetch_21st_component': {
@@ -88,14 +103,33 @@ export async function runToolCall(
       };
     }
 
+    case 'sandbox_exec': {
+      const command = call.attrs.command ?? '';
+      if (!command) return badRequest('sandbox_exec', 'missing command attribute');
+      if (!ctx.currentFiles) {
+        return offline('sandbox_exec', 'no bundle context available — sandbox_exec only works inside the build engine streaming loop.');
+      }
+      const res = await runSandboxExec({
+        command,
+        files: ctx.currentFiles,
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+      });
+      return {
+        ok: res.ok,
+        label: `exec:${command}`,
+        rendered: renderSandboxExecAsPromptSection(command, res),
+      };
+    }
+
     default:
       return {
         ok: false,
         label: `unknown:${call.name}`,
         rendered: [
           `# Tool error: unknown tool "${call.name}"`,
-          'Supported tools: fetch_21st_component, create_21st_component, logo_search, browser_fetch.',
+          'Supported tools: fetch_21st_component, create_21st_component, logo_search, browser_fetch, sandbox_exec.',
           `Allowed browser_fetch hosts: ${BROWSER_TOOL_ALLOWLIST.join(', ')}.`,
+          `Allowed sandbox_exec binaries: ${SANDBOX_EXEC_ALLOWED_BINARIES.join(', ')}.`,
         ].join('\n'),
       };
   }

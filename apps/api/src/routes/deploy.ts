@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import {
+  compileSpecCriteria,
   generateBundle,
   generateTestSuite,
   runAutoFixLoop,
@@ -91,6 +92,13 @@ export async function registerDeployRoutes(app: FastifyInstance) {
       });
       generatedByModel = process.env.OPENAI_MODEL_PRIMARY ?? 'gpt-5.5';
 
+      // Spec-as-tests: turn brief.successCriteria into runtime
+      // assertions the testing agent will run after every cycle.
+      const specCriteria = compileSpecCriteria({
+        trigger: brief.trigger,
+        successCriteria: brief.successCriteria ?? [],
+      });
+
       try {
         const result = await runAutoFixLoop({
           specialist,
@@ -109,6 +117,12 @@ export async function registerDeployRoutes(app: FastifyInstance) {
             dataClassification: brief.dataClassification,
             ownerId: session.userId,
           },
+          specCriteria,
+          // Multi-agent mode (architect → builder → reviewer) for the
+          // heaviest specialists where the value of an explicit plan
+          // and a reviewer pass is highest. Single-agent for the
+          // lighter ones — saves the architect + reviewer LLM calls.
+          multiAgent: specialist === 'fullstack_app' || specialist === 'ai_agent_builder' || specialist === 'multi_tenant_saas',
           onCycle: (evt: AutoFixCycleEvent) => {
             broadcastToOwner(session.userId, { type: 'deploy_progress', operationId: op.id, evt });
           },

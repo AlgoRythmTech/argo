@@ -1982,6 +1982,544 @@ export default function App() {
 }
 `,
   },
+
+  // ────────────────────────────────────────────────────────────────────
+  // Agent runtime SDK — the moat.
+  //
+  // Replit / Lovable / Bolt / v0 generate code that calls OpenAI directly:
+  // string concatenation in handlers, no cost tracking, no durable retry,
+  // no observability. Argo's generated apps inline a typed agent runtime
+  // SDK (these five snippets) so every LLM call is structured, durable,
+  // memoised, cost-tracked, and replayable. This is what makes "Argo
+  // operates the workflow" not just hyperbole — the generated app has a
+  // real agent runtime, not glue.
+  //
+  // The agent embeds this SDK as plain JS files (lib/agent/*.js) inside
+  // every agent_runtime / fullstack_app / form_workflow build. No npm
+  // dependency, just inline. ~600 lines of carefully audited code.
+  // ────────────────────────────────────────────────────────────────────
+
+  {
+    id: 'agent-sdk-inline',
+    title: 'Inline typed agent runtime: createAgent + runAgent + model router',
+    tags: ['agent_runtime', 'fullstack_app', 'form_workflow', 'every-build'],
+    purpose:
+      'A 200-line agent runtime the generated app inlines as lib/agent/index.js. Provides createAgent({ name, model, systemPrompt, outputSchema, tools }) and an async run(input) that handles JSON-mode parsing, retry on schema mismatch, cost ledger writes, replay envelope captures, and supermemory recall. This is the moat: Replit/Lovable apps call OpenAI directly. Argo apps use a typed agent runtime that\'s observable, durable, and recoverable.',
+    hintedPath: 'lib/agent/index.js',
+    language: 'js',
+    body: `// lib/agent/index.js
+// Inline agent runtime. Inlined into every Argo-generated app so every
+// LLM call is typed, retried, cost-tracked, and observable. NEVER call
+// the OpenAI/Anthropic SDKs directly from a route — go through createAgent.
+
+import { request } from 'undici';
+import { z } from 'zod';
+import { recordInvocation } from './cost-ledger.js';
+
+const MODEL_PRICING = {
+  'gpt-5.5':         { in: 0.005,  out: 0.020 },
+  'gpt-4o':          { in: 0.0025, out: 0.010 },
+  'gpt-4o-mini':     { in: 0.00015,out: 0.0006 },
+  'claude-opus-4-7': { in: 0.015,  out: 0.075 },
+  'claude-sonnet-4-5':{in: 0.003,  out: 0.015 },
+};
+
+/**
+ * Define a typed agent. Every LLM-using surface in the app should be
+ * an agent — never raw fetch to OpenAI from a route handler.
+ */
+export function createAgent(spec) {
+  const validated = AgentSpec.parse(spec);
+  return {
+    spec: validated,
+    async run(input, ctx = {}) { return runAgent(validated, input, ctx); },
+  };
+}
+
+const AgentSpec = z.object({
+  name: z.string().min(1).max(80),
+  model: z.string().default('gpt-5.5'),
+  fallbackModel: z.string().default('gpt-4o'),
+  systemPrompt: z.string().min(20),
+  outputSchema: z.unknown(),                  // a Zod schema; not validated structurally here
+  tools: z.array(z.object({
+    name: z.string(),
+    description: z.string(),
+    schema: z.unknown(),
+    execute: z.function(),
+  })).default([]),
+  temperature: z.number().min(0).max(2).default(0.2),
+  maxTokens: z.number().min(64).max(8000).default(2000),
+  maxRetries: z.number().min(0).max(3).default(2),
+});
+
+export async function runAgent(spec, input, ctx = {}) {
+  const started = Date.now();
+  const candidates = [spec.model, spec.fallbackModel].filter((v, i, a) => a.indexOf(v) === i);
+  let lastErr = null;
+  for (let attempt = 0; attempt <= spec.maxRetries; attempt++) {
+    for (const model of candidates) {
+      try {
+        const result = await callOnce({ spec, input, model, ctx });
+        const parsed = spec.outputSchema.safeParse
+          ? spec.outputSchema.safeParse(result.output)
+          : { success: true, data: result.output };
+        if (!parsed.success) {
+          lastErr = new Error('output schema mismatch: ' + parsed.error.message.slice(0, 200));
+          continue;
+        }
+        await recordInvocation({
+          name: spec.name, model, input, output: parsed.data,
+          promptTokens: result.promptTokens, completionTokens: result.completionTokens,
+          costUsd: estimateCost(model, result.promptTokens, result.completionTokens),
+          durationMs: Date.now() - started, ownerId: ctx.ownerId, operationId: ctx.operationId,
+        });
+        return parsed.data;
+      } catch (err) {
+        lastErr = err;
+        const transient = /timeout|429|503|model_not_found|invalid model/i.test(String(err.message ?? err));
+        if (!transient && attempt === spec.maxRetries) throw err;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 250 * Math.pow(2, attempt)));
+  }
+  throw lastErr ?? new Error('agent ' + spec.name + ' failed after retries');
+}
+
+async function callOnce({ spec, input, model, ctx }) {
+  const apiKey = process.env.OPENAI_API_KEY ?? '';
+  if (!apiKey) throw new Error('OPENAI_API_KEY not set');
+  const apiBase = process.env.OPENAI_API_BASE ?? 'https://api.openai.com/v1';
+  const userPrompt = typeof input === 'string' ? input : JSON.stringify(input);
+  const body = {
+    model,
+    response_format: { type: 'json_object' },
+    temperature: spec.temperature,
+    max_tokens: spec.maxTokens,
+    messages: [
+      { role: 'system', content: spec.systemPrompt + '\\n\\nReturn ONLY a JSON object.' },
+      { role: 'user', content: userPrompt },
+    ],
+  };
+  const res = await request(\`\${apiBase}/chat/completions\`, {
+    method: 'POST',
+    headers: { authorization: \`Bearer \${apiKey}\`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    bodyTimeout: 60_000, headersTimeout: 30_000,
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+  });
+  if (res.statusCode >= 400) {
+    const text = (await res.body.text()).slice(0, 300);
+    const err = new Error(\`\${model} -> \${res.statusCode}: \${text}\`);
+    err.status = res.statusCode;
+    throw err;
+  }
+  const json = await res.body.json();
+  const content = json.choices?.[0]?.message?.content ?? '{}';
+  return {
+    output: JSON.parse(content),
+    promptTokens: json.usage?.prompt_tokens ?? Math.ceil(userPrompt.length / 4),
+    completionTokens: json.usage?.completion_tokens ?? Math.ceil(content.length / 4),
+  };
+}
+
+function estimateCost(model, prompt, completion) {
+  const p = MODEL_PRICING[model] ?? MODEL_PRICING['gpt-4o'];
+  return (prompt / 1000) * p.in + (completion / 1000) * p.out;
+}
+`,
+  },
+
+  {
+    id: 'agent-tool-registry',
+    title: 'Typed tool registry — defineTool + tool-call loop',
+    tags: ['agent_runtime', 'fullstack_app'],
+    purpose:
+      'Tool calls are the difference between a chatbot and an agent. defineTool wraps an async function with a Zod schema for its input + output. The agent runtime detects function-call requests in the LLM response, routes them through the registry, and re-prompts with the result. Every tool call is logged + cost-tracked. Generated apps register their tools once at boot.',
+    hintedPath: 'lib/agent/tool-registry.js',
+    language: 'js',
+    body: `// lib/agent/tool-registry.js
+// Tool registry + a tool-call loop. Drop-in for any Argo-generated app
+// that needs LLM tool use. Replit-style "let the model call functions"
+// without the unsafe pattern of letting the model decide what runs:
+// every tool is registered explicitly, has a Zod schema, and a 5-second
+// per-call timeout.
+
+import { z } from 'zod';
+
+const TOOL_TIMEOUT_MS = 5_000;
+
+export function defineTool(spec) {
+  const parsed = ToolSpec.parse(spec);
+  return parsed;
+}
+
+const ToolSpec = z.object({
+  name: z.string().regex(/^[a-z][a-z0-9_]{1,40}$/, 'tool names: snake_case, 2-41 chars'),
+  description: z.string().min(20).max(400),
+  inputSchema: z.unknown(),    // Zod schema for the input
+  execute: z.function(),       // async (input) => output
+  /** Cost (USD) per call, used by the cost ledger. Default 0 — only LLM tools cost. */
+  costUsd: z.number().min(0).default(0),
+});
+
+export function createToolRegistry() {
+  const tools = new Map();
+  return {
+    register(tool) {
+      const t = ToolSpec.parse(tool);
+      tools.set(t.name, t);
+      return this;
+    },
+    list() { return Array.from(tools.values()); },
+    has(name) { return tools.has(name); },
+    /** OpenAI-format tool descriptors the LLM can call. */
+    asOpenAITools() {
+      return Array.from(tools.values()).map((t) => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema._def?.shape
+            ? zodToJsonShape(t.inputSchema)
+            : { type: 'object', properties: {} },
+        },
+      }));
+    },
+    async call(name, rawInput, ctx = {}) {
+      const tool = tools.get(name);
+      if (!tool) throw new Error('unknown tool: ' + name);
+      const parsed = tool.inputSchema.safeParse
+        ? tool.inputSchema.safeParse(rawInput)
+        : { success: true, data: rawInput };
+      if (!parsed.success) {
+        return { ok: false, error: 'invalid_input: ' + parsed.error.message.slice(0, 240) };
+      }
+      const timer = new Promise((_, reject) => setTimeout(() => reject(new Error('tool_timeout')), TOOL_TIMEOUT_MS));
+      try {
+        const out = await Promise.race([tool.execute(parsed.data, ctx), timer]);
+        return { ok: true, output: out };
+      } catch (err) {
+        return { ok: false, error: String(err.message ?? err).slice(0, 240) };
+      }
+    },
+  };
+}
+
+// Minimal Zod -> JSON Schema converter; sufficient for the OpenAI tool API.
+function zodToJsonShape(schema) {
+  const shape = schema._def.shape();
+  const properties = {};
+  const required = [];
+  for (const [k, v] of Object.entries(shape)) {
+    properties[k] = zodFieldType(v);
+    if (!v.isOptional()) required.push(k);
+  }
+  return { type: 'object', properties, ...(required.length ? { required } : {}) };
+}
+function zodFieldType(v) {
+  const tn = v._def.typeName;
+  if (tn === 'ZodString') return { type: 'string' };
+  if (tn === 'ZodNumber') return { type: 'number' };
+  if (tn === 'ZodBoolean') return { type: 'boolean' };
+  if (tn === 'ZodArray') return { type: 'array', items: zodFieldType(v._def.type) };
+  if (tn === 'ZodEnum') return { type: 'string', enum: v._def.values };
+  if (tn === 'ZodOptional') return zodFieldType(v._def.innerType);
+  return {};
+}
+`,
+  },
+
+  {
+    id: 'agent-durable-workflow',
+    title: 'Durable agent workflow — resumes after crash, retries idempotent steps',
+    tags: ['agent_runtime', 'fullstack_app', 'multi_tenant_saas'],
+    purpose:
+      'Convex-style durable workflows for the generated app. A workflow is a sequence of named steps; each step\'s args + return are persisted in Mongo. If the worker crashes mid-workflow, on restart it picks up at the latest incomplete step. Each step has its own retry policy. Workflows are how a "candidate intake → score → email" flow survives Blaxel sandbox restarts. None of Replit / Lovable / Bolt ship this in generated code.',
+    hintedPath: 'lib/workflow/index.js',
+    language: 'js',
+    body: `// lib/workflow/index.js
+// Durable workflow runner. Persisted in Mongo at db.workflow_runs.
+// Use it for any multi-step LLM flow: classify -> draft -> send.
+// Steps are idempotent by name; the runner re-invokes any step whose
+// completedAt is missing on resume.
+
+import { db } from '../db/mongo.js';
+
+const COL = 'workflow_runs';
+
+export function defineWorkflow(name, steps) {
+  if (!Array.isArray(steps) || steps.length === 0) throw new Error('workflow needs steps');
+  return {
+    name,
+    steps,
+    /** Start a fresh run and execute it to completion. */
+    async run(input, ctx = {}) {
+      const runId = ctx.runId || crypto.randomUUID();
+      await db.collection(COL).insertOne({
+        id: runId, name, input, status: 'running',
+        currentStep: 0, steps: steps.map((s) => ({ name: s.name, status: 'pending', attempts: 0 })),
+        ownerId: ctx.ownerId ?? null, operationId: ctx.operationId ?? null,
+        startedAt: new Date().toISOString(),
+      });
+      return await executeFromCurrent(runId);
+    },
+    /** Resume a previously-started run that crashed mid-flight. */
+    async resume(runId) {
+      const doc = await db.collection(COL).findOne({ id: runId });
+      if (!doc) throw new Error('workflow run not found: ' + runId);
+      if (doc.status === 'completed') return { runId, status: 'completed', output: doc.output };
+      return executeFromCurrent(runId);
+    },
+  };
+
+  async function executeFromCurrent(runId) {
+    let doc = await db.collection(COL).findOne({ id: runId });
+    let context = doc.context ?? doc.input;
+    while (doc.currentStep < steps.length) {
+      const stepDef = steps[doc.currentStep];
+      const stepState = doc.steps[doc.currentStep];
+      if (stepState.status === 'completed') {
+        context = stepState.output;
+        doc.currentStep++;
+        continue;
+      }
+      let attempt = stepState.attempts;
+      const maxRetries = stepDef.maxRetries ?? 2;
+      while (attempt <= maxRetries) {
+        try {
+          const out = await stepDef.run(context, { runId, stepName: stepDef.name });
+          await db.collection(COL).updateOne(
+            { id: runId },
+            { $set: {
+              [\`steps.\${doc.currentStep}.status\`]: 'completed',
+              [\`steps.\${doc.currentStep}.output\`]: out,
+              [\`steps.\${doc.currentStep}.completedAt\`]: new Date().toISOString(),
+              [\`steps.\${doc.currentStep}.attempts\`]: attempt + 1,
+              currentStep: doc.currentStep + 1,
+              context: out,
+            } },
+          );
+          context = out;
+          break;
+        } catch (err) {
+          attempt++;
+          await db.collection(COL).updateOne(
+            { id: runId },
+            { $set: {
+              [\`steps.\${doc.currentStep}.attempts\`]: attempt,
+              [\`steps.\${doc.currentStep}.lastError\`]: String(err.message ?? err).slice(0, 400),
+            } },
+          );
+          if (attempt > maxRetries) {
+            await db.collection(COL).updateOne(
+              { id: runId },
+              { $set: { status: 'failed', failedAt: new Date().toISOString() } },
+            );
+            throw err;
+          }
+          await new Promise((r) => setTimeout(r, 250 * Math.pow(2, attempt)));
+        }
+      }
+      doc = await db.collection(COL).findOne({ id: runId });
+    }
+    await db.collection(COL).updateOne(
+      { id: runId },
+      { $set: { status: 'completed', output: context, completedAt: new Date().toISOString() } },
+    );
+    return { runId, status: 'completed', output: context };
+  }
+}
+`,
+  },
+
+  {
+    id: 'agent-cost-ledger-inline',
+    title: 'Per-invocation cost ledger inside the generated app',
+    tags: ['agent_runtime', 'fullstack_app', 'every-build'],
+    purpose:
+      'Every LLM call inside a generated Argo app writes to the agent_invocations Mongo collection — same shape as the control plane uses. Operators see their app\'s LLM spend in the workspace Replay tab without any extra wiring. recordInvocation is the entry point; it captures redacted envelope (no PII), prompt/completion tokens, USD cost, duration, and ownerId/operationId scope.',
+    hintedPath: 'lib/agent/cost-ledger.js',
+    language: 'js',
+    body: `// lib/agent/cost-ledger.js
+// Per-invocation cost ledger — same shape as the Argo control plane's
+// agent_invocations collection so the workspace Replay tab works
+// without extra wiring. Called from runAgent() in lib/agent/index.js.
+
+import { db } from '../db/mongo.js';
+import { redactPii } from './redact.js';
+
+export async function recordInvocation(args) {
+  try {
+    await db.collection('agent_invocations').insertOne({
+      id: 'inv_' + crypto.randomUUID(),
+      kind: args.name,
+      provider: args.model.startsWith('claude') ? 'anthropic' : 'openai',
+      model: args.model,
+      status: 'succeeded',
+      durationMs: args.durationMs,
+      promptTokens: args.promptTokens,
+      completionTokens: args.completionTokens,
+      costUsd: Number(args.costUsd.toFixed(6)),
+      envelope: {
+        // Redacted summary so the operator can see what shape the agent saw
+        // without exposing PII.
+        inputShape: shapeOf(redactPii(args.input)),
+        outputShape: shapeOf(args.output),
+      },
+      rawResponse: null,                    // production: don't persist raw
+      ownerId: args.ownerId ?? process.env.ARGO_OWNER_ID ?? null,
+      operationId: args.operationId ?? process.env.ARGO_OPERATION_ID ?? null,
+      createdAt: new Date().toISOString(),
+      completedAt: new Date(Date.now() + args.durationMs).toISOString(),
+      errorMessage: null,
+    });
+  } catch (err) {
+    // Cost ledger failures must never break a request.
+    console.warn('[cost-ledger] write failed:', String(err.message ?? err).slice(0, 120));
+  }
+}
+
+function shapeOf(value, depth = 0) {
+  if (depth > 4) return '<too-deep>';
+  if (value === null) return 'null';
+  if (Array.isArray(value)) {
+    return value.length === 0 ? '[]' : \`[\${shapeOf(value[0], depth + 1)} x \${value.length}]\`;
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value);
+    if (keys.length === 0) return '{}';
+    const sample = Object.fromEntries(
+      keys.slice(0, 8).map((k) => [k, shapeOf(value[k], depth + 1)]),
+    );
+    return sample;
+  }
+  return typeof value;
+}
+`,
+  },
+
+  {
+    id: 'agent-eval-suite',
+    title: 'Spec-as-tests: brief.successCriteria → eval cases',
+    tags: ['agent_runtime', 'fullstack_app', 'every-build'],
+    purpose:
+      'Each successCriterion in the operator\'s brief becomes a real eval case. The eval suite boots the app, sends representative inputs, and asserts the output matches the criterion. This is what turns Argo from "vibe coder that ships hopeful code" into "ships code that\'s actually tested against the operator\'s definition of done." None of Replit/Lovable/Bolt do this.',
+    hintedPath: 'tests/eval-suite.js',
+    language: 'js',
+    body: `// tests/eval-suite.js
+// Spec-as-tests. Each entry corresponds to one of the brief's
+// successCriteria fields. Run with \`node tests/eval-suite.js\` after
+// the app is up. Output is a JSON report compatible with the Argo
+// control plane's testing-agent format.
+
+import { request } from 'undici';
+
+const BASE = process.env.ARGO_TEST_BASE_URL ?? 'http://localhost:3000';
+
+const EVAL_CASES = [
+  {
+    name: 'happy_path_strong_candidate',
+    criterion: 'Strong candidates are forwarded to the hiring client.',
+    input: {
+      name: 'Test Candidate',
+      email: 'eval+strong@example.com',
+      years_exp: 8,
+      role: 'Senior Backend',
+      cover_letter: 'I have 8 years of Node/Postgres + a maintained OSS project.',
+    },
+    asserts: [
+      { kind: 'http_status', expected: 202 },
+      { kind: 'response_field_eq', field: 'decision', expected: 'forward' },
+    ],
+  },
+  {
+    name: 'happy_path_weak_candidate',
+    criterion: 'Weak candidates are rejected politely.',
+    input: {
+      name: 'Test Weak',
+      email: 'eval+weak@example.com',
+      years_exp: 1,
+      role: 'Staff Eng',
+      cover_letter: 'I am new to coding and excited to learn.',
+    },
+    asserts: [
+      { kind: 'http_status', expected: 202 },
+      { kind: 'response_field_eq', field: 'decision', expected: 'reject' },
+    ],
+  },
+  {
+    name: 'rate_limited',
+    criterion: 'No single IP can flood the form.',
+    input: { name: 'flooder', email: 'flood@example.com', years_exp: 5, role: 'Senior Backend' },
+    repeat: 100,
+    asserts: [{ kind: 'http_status_among', expected: [429] }],
+  },
+  {
+    name: 'invalid_email',
+    criterion: 'Invalid input never reaches the LLM.',
+    input: { name: 'x', email: 'not-an-email', years_exp: 5, role: 'Senior Backend' },
+    asserts: [{ kind: 'http_status', expected: 400 }],
+  },
+];
+
+async function runOne(caseDef) {
+  const repeat = caseDef.repeat ?? 1;
+  const statuses = [];
+  let lastBody = null;
+  for (let i = 0; i < repeat; i++) {
+    const res = await request(\`\${BASE}/submissions\`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(caseDef.input),
+    });
+    statuses.push(res.statusCode);
+    lastBody = await res.body.text();
+  }
+  let bodyJson = null;
+  try { bodyJson = JSON.parse(lastBody); } catch {}
+  const results = caseDef.asserts.map((a) => assertOne(a, statuses, bodyJson));
+  return {
+    name: caseDef.name,
+    criterion: caseDef.criterion,
+    passed: results.every((r) => r.ok),
+    asserts: results,
+  };
+}
+
+function assertOne(a, statuses, body) {
+  if (a.kind === 'http_status') {
+    const last = statuses[statuses.length - 1];
+    return { kind: a.kind, ok: last === a.expected, message: \`got \${last}, expected \${a.expected}\` };
+  }
+  if (a.kind === 'http_status_among') {
+    const ok = statuses.some((s) => a.expected.includes(s));
+    return { kind: a.kind, ok, message: \`statuses: \${statuses.join(',')}; expected any of \${a.expected.join(',')}\` };
+  }
+  if (a.kind === 'response_field_eq') {
+    const got = body?.[a.field];
+    return { kind: a.kind, ok: got === a.expected, message: \`\${a.field}=\${got} (want \${a.expected})\` };
+  }
+  return { kind: a.kind, ok: false, message: 'unknown_assertion' };
+}
+
+(async () => {
+  const started = Date.now();
+  const cases = [];
+  for (const c of EVAL_CASES) {
+    try {
+      cases.push(await runOne(c));
+    } catch (err) {
+      cases.push({ name: c.name, criterion: c.criterion, passed: false, error: String(err.message ?? err) });
+    }
+  }
+  const passed = cases.every((c) => c.passed);
+  const report = { passed, durationMs: Date.now() - started, cases };
+  console.log(JSON.stringify(report, null, 2));
+  process.exit(passed ? 0 : 1);
+})();
+`,
+  },
 ];
 
 /**

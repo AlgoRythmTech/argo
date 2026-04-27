@@ -37,6 +37,7 @@ const Body = z.object({
       'search_service',
       'internal_tool',
       'fullstack_app',
+      'ai_agent_builder',
       'generic',
     ])
     .optional(),
@@ -192,6 +193,29 @@ export async function registerBuildStreamRoutes(app: FastifyInstance) {
               durationMs: evt.report.durationMs,
               routesExercised: evt.report.routesExercised,
               failures: evt.report.failures.slice(0, 12),
+            });
+          } else if (evt.kind === 'architect_started') {
+            writeEvent('architect', { phase: 'started' });
+          } else if (evt.kind === 'architect_completed') {
+            writeEvent('architect', {
+              phase: 'completed',
+              title: evt.plan.title,
+              summary: evt.plan.summary,
+              fileCount: evt.plan.files.length,
+              dependencyCount: evt.plan.dependencies.length,
+              files: evt.plan.files.slice(0, 60).map((f) => ({
+                path: f.path,
+                size: f.size,
+                rationale: f.rationale.slice(0, 200),
+              })),
+              mermaid: evt.plan.mermaid.slice(0, 1200),
+            });
+          } else if (evt.kind === 'reviewer_run') {
+            writeEvent('reviewer', {
+              cycle: evt.cycle,
+              passed: evt.report.passed,
+              summary: evt.report.summary,
+              findings: evt.report.findings.slice(0, 12),
             });
           } else if (evt.kind === 'cycle_start') {
             writeEvent('cycle_start', { cycle: evt.cycle, promptLength: evt.promptLength });

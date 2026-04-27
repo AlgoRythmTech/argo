@@ -238,6 +238,27 @@ function unique(values: string[]): string[] {
   return out;
 }
 
+// Inline mini-parser for <dyad-write path="...">CONTENTS</dyad-write> so
+// streamBuildWithTools can build a current bundle snapshot for tools
+// without depending on @argo/build-engine (which would create a circular
+// dep — build-engine already imports from @argo/agent).
+const DYAD_WRITE = /<dyad-write\b[^>]*\bpath\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/dyad-write>/g;
+
+function mergeFilesFromStream(
+  inherited: ReadonlyMap<string, string>,
+  streamed: string,
+): Map<string, string> {
+  const merged = new Map(inherited);
+  DYAD_WRITE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = DYAD_WRITE.exec(streamed)) !== null) {
+    const path = m[1]!.trim();
+    const contents = m[2]!;
+    merged.set(path, contents);
+  }
+  return merged;
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Tool-call wrapper.
 //
@@ -266,6 +287,12 @@ export interface StreamBuildWithToolsArgs extends StreamBuildArgs {
   onTool?: (event: ToolEvent) => void;
   /** Override the default 2-round cap. Hard-clamped to [0, 4]. */
   maxToolRounds?: number;
+  /**
+   * Snapshot of the current bundle (path → contents). Threaded into
+   * tool calls so sandbox_exec can run against the in-progress source
+   * tree. The auto-fix loop passes this from its own files map.
+   */
+  currentFiles?: ReadonlyMap<string, string>;
 }
 
 export async function* streamBuildWithTools(
@@ -307,11 +334,21 @@ export async function* streamBuildWithTools(
 
     // Execute each tool call. Cap at 4 per round so a runaway response
     // can't fan out across the whole allowlist.
+    // Build a per-round snapshot of the current bundle: the inherited
+    // files from auto-fix-loop PLUS any new dyad-write blocks the agent
+    // emitted before the tool call. This is what sandbox_exec runs
+    // against, so the agent can write a test then immediately run it.
+    const inheritedFiles = args.currentFiles ?? new Map<string, string>();
+    const roundFiles = mergeFilesFromStream(inheritedFiles, roundFullText);
+
     const toExecute = calls.slice(0, 4);
     const resultByRaw = new Map<string, string>();
     for (const call of toExecute) {
       args.onTool?.({ kind: 'tool_called', name: call.name });
-      const exec = await runToolCall(call, { ...(args.signal ? { signal: args.signal } : {}) });
+      const exec = await runToolCall(call, {
+        ...(args.signal ? { signal: args.signal } : {}),
+        currentFiles: roundFiles,
+      });
       args.onTool?.({
         kind: 'tool_completed',
         name: call.name,

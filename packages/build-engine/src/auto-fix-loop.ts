@@ -9,6 +9,13 @@ import { applyActionsToFileMap, parseDyadResponse, type ParsedAction } from './d
 import { runQualityGate, type QualityReport } from './quality-gate.js';
 import { BundleBuilder } from './bundle-builder.js';
 import { runTestingAgent, renderTestingReportAsAutoFixPrompt, type TestingReport } from './testing-agent.js';
+import {
+  runArchitect,
+  runReviewer,
+  renderReviewAsAutoFixPrompt,
+  type FilePlan,
+  type ReviewReport,
+} from './multi-agent-build.js';
 
 export interface AutoFixArgs {
   specialist: Specialist;
@@ -46,6 +53,25 @@ export interface AutoFixArgs {
    * generator path that's already proven).
    */
   enableRuntimeTesting?: boolean;
+  /**
+   * Spec-as-tests. The deploy route compiles brief.successCriteria into
+   * a list of runtime assertions and passes them through here. The
+   * testing agent runs them after /health is green and any failure
+   * forces another auto-fix cycle.
+   */
+  specCriteria?: import('./testing-agent.js').RunTestingAgentArgs['specCriteria'];
+  /**
+   * Multi-agent mode (Cursor 2026 / Replit Agent style):
+   *   1. Architect produces a FilePlan from the brief.
+   *   2. Builder (the streamBuild loop) consumes the plan and emits files.
+   *   3. Reviewer reads the bundle + plan, produces structured findings.
+   *   4. Bad findings force another builder cycle.
+   *
+   * Default false — the single-agent loop is fine for most builds. Flip
+   * for fullstack_app / ai_agent_builder where the value of an explicit
+   * plan + a reviewer-pass is highest.
+   */
+  multiAgent?: boolean;
   /** Per-cycle progress callback. */
   onCycle?: (event: AutoFixCycleEvent) => void;
   /**
@@ -67,10 +93,13 @@ export interface AutoFixArgs {
 }
 
 export type AutoFixCycleEvent =
+  | { kind: 'architect_started' }
+  | { kind: 'architect_completed'; plan: FilePlan }
   | { kind: 'cycle_start'; cycle: number; promptLength: number }
   | { kind: 'actions_parsed'; cycle: number; actions: ParsedAction[]; prose: string }
   | { kind: 'gate_run'; cycle: number; report: QualityReport }
   | { kind: 'testing_run'; cycle: number; report: TestingReport }
+  | { kind: 'reviewer_run'; cycle: number; report: ReviewReport }
   | { kind: 'cycle_complete'; cycle: number; passed: boolean }
   | { kind: 'aborted' };
 
@@ -97,6 +126,41 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
   let lastProse = '';
   let newDependencies: string[] = [];
   let userPrompt = args.userPrompt;
+  let plan: FilePlan | null = null;
+
+  // Multi-agent mode: run the architect first to produce a FilePlan;
+  // the builder consumes it as additional context.
+  if (args.multiAgent) {
+    const architectStarted: AutoFixCycleEvent = { kind: 'architect_started' };
+    history.push(architectStarted);
+    args.onCycle?.(architectStarted);
+    try {
+      plan = await runArchitect({
+        specialist: args.specialist,
+        userPrompt,
+        ...(args.augmentation
+          ? {
+              augmentation: {
+                ...(args.augmentation.integrations !== undefined ? { integrations: args.augmentation.integrations } : {}),
+                ...(args.augmentation.auth !== undefined ? { auth: args.augmentation.auth } : {}),
+                ...(args.augmentation.dataClassification !== undefined ? { dataClassification: args.augmentation.dataClassification } : {}),
+              },
+            }
+          : {}),
+        ...(args.signal ? { signal: args.signal } : {}),
+      });
+      const architectDone: AutoFixCycleEvent = { kind: 'architect_completed', plan };
+      history.push(architectDone);
+      args.onCycle?.(architectDone);
+      // Inject the plan into the builder's user prompt so cycle 1 knows
+      // exactly which files to ship.
+      userPrompt = composeBuilderPromptWithPlan({ originalPrompt: userPrompt, plan });
+    } catch (err) {
+      // Architect failure is non-fatal — fall through to single-agent.
+      console.warn('[auto-fix-loop] architect failed, continuing single-agent:', String(err).slice(0, 200));
+      plan = null;
+    }
+  }
 
   for (let cycle = 1; cycle <= maxCycles; cycle++) {
     if (args.signal?.aborted) {
@@ -133,6 +197,7 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
           : {}),
         ...(args.signal ? { signal: args.signal } : {}),
         ...(args.onTool ? { onTool: args.onTool } : {}),
+        currentFiles: files,
       })) {
         if (chunk.delta && args.onChunk) args.onChunk(chunk.delta, chunk.fullText, chunk.totalTokens);
         fullText = chunk.fullText;
@@ -190,7 +255,10 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
     const runtimeTestingEnabled = args.enableRuntimeTesting !== false;
     if (report.passed && runtimeTestingEnabled) {
       try {
-        testingReport = await runTestingAgent({ bundle });
+        testingReport = await runTestingAgent({
+          bundle,
+          ...(args.specCriteria ? { specCriteria: args.specCriteria } : {}),
+        });
       } catch (err) {
         // If the testing agent itself crashes, surface that as a
         // failure but don't block the build — the deploy path will
@@ -210,7 +278,37 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
       args.onCycle?.(testEvt);
     }
 
-    const cyclePassed = report.passed && (testingReport == null || testingReport.passed);
+    // Reviewer agent (multi-agent mode only): runs ONLY when the static
+    // gate AND the runtime tests are green, since the reviewer is
+    // expensive and its job is "did we ship the plan?", not "does
+    // the code parse." Reviewer findings can flip cyclePassed to false
+    // for one more builder pass.
+    let reviewReport: ReviewReport | null = null;
+    if (
+      args.multiAgent &&
+      plan &&
+      report.passed &&
+      (testingReport == null || testingReport.passed)
+    ) {
+      try {
+        reviewReport = await runReviewer({
+          plan,
+          files,
+          ...(args.signal ? { signal: args.signal } : {}),
+        });
+        const reviewerEvt: AutoFixCycleEvent = { kind: 'reviewer_run', cycle, report: reviewReport };
+        history.push(reviewerEvt);
+        args.onCycle?.(reviewerEvt);
+      } catch (err) {
+        // Reviewer failure: we don't block the build — log + continue.
+        console.warn('[auto-fix-loop] reviewer failed:', String(err).slice(0, 200));
+      }
+    }
+
+    const cyclePassed =
+      report.passed &&
+      (testingReport == null || testingReport.passed) &&
+      (reviewReport == null || reviewReport.passed);
     const completeEvt: AutoFixCycleEvent = {
       kind: 'cycle_complete',
       cycle,
@@ -244,6 +342,9 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
       ...(testingReport && !testingReport.passed
         ? { runtimeReport: renderTestingReportAsAutoFixPrompt(testingReport) }
         : {}),
+      ...(reviewReport && !reviewReport.passed
+        ? { reviewerReport: renderReviewAsAutoFixPrompt(reviewReport) }
+        : {}),
     });
   }
 
@@ -267,6 +368,8 @@ function composeRetryPrompt(args: {
   report: QualityReport;
   /** Optional runtime-test report when the testing agent fired and failed. */
   runtimeReport?: string;
+  /** Optional reviewer report when multi-agent mode caught issues. */
+  reviewerReport?: string;
 }): string {
   const lines: string[] = [
     args.originalPrompt,
@@ -289,12 +392,52 @@ function composeRetryPrompt(args: {
     lines.push(args.runtimeReport);
     lines.push('');
   }
+  if (args.reviewerReport) {
+    lines.push('## Reviewer findings');
+    lines.push('');
+    lines.push(args.reviewerReport);
+    lines.push('');
+  }
   lines.push(
     'Re-emit ONLY the files that need fixing using <dyad-write>. Do not',
     'touch unrelated files. Each <dyad-write> must contain the FULL new file',
     'contents (no partial diffs). End with one <dyad-chat-summary>.',
   );
   return lines.join('\n');
+}
+
+function composeBuilderPromptWithPlan(args: {
+  originalPrompt: string;
+  plan: FilePlan;
+}): string {
+  return [
+    args.originalPrompt,
+    '',
+    '# Architect file plan (you are the BUILDER — implement this plan exactly)',
+    '',
+    `Title: ${args.plan.title}`,
+    `Summary: ${args.plan.summary}`,
+    '',
+    '## Files to ship',
+    ...args.plan.files.map((f, i) =>
+      `${i + 1}. ${f.path} (${f.size}, argo:generated=${f.argoGenerated})\n` +
+      `   Why: ${f.rationale}\n` +
+      (f.dependsOn.length ? `   Imports from: ${f.dependsOn.join(', ')}\n` : '') +
+      (f.acceptance.length ? `   Acceptance: ${f.acceptance.join(' · ')}` : ''),
+    ),
+    '',
+    `## Dependencies to install: ${args.plan.dependencies.join(', ') || '(none)'}`,
+    '',
+    'Architecture:',
+    '```mermaid',
+    args.plan.mermaid,
+    '```',
+    '',
+    'Implement the plan with one <dyad-write> per file. Files should match',
+    'the plan paths exactly. Use <argo-tool name="sandbox_exec" command="tsc --noEmit" />',
+    'after the backbone files to verify your work, then continue with frontend',
+    'and tests. End with one <dyad-chat-summary>.',
+  ].join('\n');
 }
 
 function filesToBundle(
