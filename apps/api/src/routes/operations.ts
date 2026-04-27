@@ -674,6 +674,54 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
   });
 
   /**
+   * GET /api/operations/:id/manifest[?bundleVersion=N]
+   *
+   * Per-bundle build manifest — the intensive doc cataloguing every
+   * file / dep / agent / workflow / route the deploy generated.
+   * Persisted on every successful deploy in operation_manifests.
+   *
+   * Returns the latest bundle's manifest by default; pass bundleVersion
+   * to retrieve a historical one. 404 when no manifest exists yet
+   * (operation never deployed).
+   */
+  app.get('/api/operations/:id/manifest', async (request, reply) => {
+    const session = requireSession(request, reply);
+    if (!session) return;
+    const id = String((request.params as { id: string }).id);
+    const op = await getPrisma().operation.findFirst({ where: { id, ownerId: session.userId } });
+    if (!op) return reply.code(404).send({ error: 'not_found' });
+
+    const requestedVersion = Number(
+      (request.query as { bundleVersion?: string }).bundleVersion ?? 0,
+    );
+    const { db } = await getMongo();
+    const filter: Record<string, unknown> = { operationId: op.id };
+    if (Number.isFinite(requestedVersion) && requestedVersion > 0) {
+      filter.bundleVersion = requestedVersion;
+    }
+    const doc = await db
+      .collection('operation_manifests')
+      .find(filter)
+      .sort({ bundleVersion: -1 })
+      .limit(1)
+      .next();
+    if (!doc) {
+      return reply.code(404).send({
+        error: 'no_manifest_yet',
+        message: 'No build manifest exists. Deploy the operation to generate one.',
+      });
+    }
+    return reply.send({
+      operationId: op.id,
+      bundleVersion: doc.bundleVersion,
+      generatedAt: doc.generatedAt,
+      manifest: doc.manifest,
+      prose: doc.prose ?? null,
+      markdown: doc.markdown,
+    });
+  });
+
+  /**
    * GET /api/operations/:id/readme[?regenerate=true]
    *
    * On-demand operation README. Cached per (operationId, bundleVersion)

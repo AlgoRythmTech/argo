@@ -9,8 +9,11 @@ import {
   type AutoFixCycleEvent,
 } from '@argo/build-engine';
 import {
+  buildManifest,
+  composeManifestProse,
   pickSpecialist,
   renderBriefAsPrompt,
+  renderManifestAsMarkdown,
 } from '@argo/agent';
 import {
   createBuildSandbox,
@@ -256,6 +259,65 @@ export async function registerDeployRoutes(app: FastifyInstance) {
         lastEventAt: new Date(),
       },
     });
+
+    // ── BUILD MANIFEST ──────────────────────────────────────────────
+    // Every successful deploy ships an intensive doc cataloguing every
+    // file / dep / agent / workflow / route. The catalogue is built
+    // deterministically from the bundle; the prose sections are GPT-4o
+    // (classifier-tier model — cheap, structured). Persisted in the
+    // operation_manifests collection keyed on (operationId, bundleVersion).
+    try {
+      const manifestData = buildManifest({
+        files: bundle.files.map((f) => ({
+          path: f.path,
+          contents: f.contents,
+          argoGenerated: f.argoGenerated,
+        })),
+      });
+      let prose = null;
+      if (briefDoc) {
+        const briefShape = briefDoc as unknown as ProjectBrief;
+        try {
+          prose = await composeManifestProse({
+            operationName: op.name,
+            brief: {
+              name: briefShape.name,
+              audience: briefShape.audience,
+              outcome: briefShape.outcome,
+              trigger: briefShape.trigger,
+            },
+            manifest: manifestData,
+          });
+        } catch (err) {
+          // Prose is best-effort — manifest still ships without it.
+          logger.warn({ err }, 'manifest prose generation failed; using deterministic boilerplate');
+        }
+      }
+      const markdown = renderManifestAsMarkdown({
+        operationName: op.name,
+        bundleVersion,
+        manifest: manifestData,
+        ...(prose ? { prose } : {}),
+      });
+      await db.collection('operation_manifests').updateOne(
+        { operationId: op.id, bundleVersion },
+        {
+          $set: {
+            operationId: op.id,
+            ownerId: session.userId,
+            bundleVersion,
+            manifest: manifestData,
+            ...(prose ? { prose } : {}),
+            markdown,
+            generatedAt: new Date().toISOString(),
+          },
+        },
+        { upsert: true },
+      );
+    } catch (err) {
+      // Manifest never blocks a deploy.
+      logger.warn({ err, operationId: op.id }, 'build manifest generation failed');
+    }
 
     const activity = await appendActivity({
       ownerId: session.userId,

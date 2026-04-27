@@ -266,6 +266,32 @@ export const operations = {
       };
       markdown: string;
     }>(`/api/operations/${id}/readme${regenerate ? '?regenerate=true' : ''}`),
+  manifest: (id: string, bundleVersion?: number) => {
+    const qs = bundleVersion ? `?bundleVersion=${bundleVersion}` : '';
+    return api.get<{
+      operationId: string;
+      bundleVersion: number;
+      generatedAt: string;
+      manifest: {
+        files: Array<{ path: string; bytes: number; argoGenerated: boolean; role: string }>;
+        dependencies: Record<string, string>;
+        agents: Array<{ name: string; file: string; model: string | null; tools: string[] }>;
+        routes: Array<{ method: string; pattern: string; file: string }>;
+        workflows: Array<{ name: string; file: string; steps: string[] }>;
+        envVars: Array<{ name: string; firstUseFile: string; documented: boolean }>;
+        generatedBytes: number;
+        fileCount: number;
+      };
+      prose: {
+        oneLine: string;
+        overview: string;
+        howItWorks: string;
+        ifSomethingBreaks: string;
+        knownLimitations: string;
+      } | null;
+      markdown: string;
+    }>(`/api/operations/${id}/manifest${qs}`);
+  },
   searchBundle: (id: string, q: string, caseSensitive = false) => {
     const qs = new URLSearchParams({ q });
     if (caseSensitive) qs.set('caseSensitive', 'true');

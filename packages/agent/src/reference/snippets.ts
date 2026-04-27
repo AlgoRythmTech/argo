@@ -3109,6 +3109,219 @@ function extractVoicePatterns(emails) {
 })();
 `,
   },
+  {
+    id: 'browser-runtime-error-reporter',
+    title: 'Browser runtime-error reporter — postMessage to parent for Argo\'s preview overlay',
+    tags: ['every-build', 'frontend', 'preview-error-reporting'],
+    purpose:
+      'Argo\'s web preview shows an error overlay when the deployed app throws. That overlay listens on window.message for "argo:runtime-error" events. The deployed page must opt in by including this tiny reporter (no deps) so window.onerror and unhandledrejection get forwarded to the parent. When the page is opened standalone (not in an iframe), it is a no-op. Inject it as the first <script> in your HTML head.',
+    hintedPath: 'public/argo-error-reporter.js',
+    language: 'js',
+    body: `// Self-contained runtime error reporter. Loaded as the first script
+// inside the deployed app so it can capture every error, including those
+// in module bootstrap. Forwards events to the parent (Argo preview pane).
+(function () {
+  if (typeof window === 'undefined') return;
+  if (window.parent === window) return; // standalone — no overlay to talk to
+  function forward(payload) {
+    try {
+      window.parent.postMessage(
+        Object.assign({ type: 'argo:runtime-error' }, payload, { ts: Date.now() }),
+        '*', // overlay verifies origin server-side; safe to broadcast
+      );
+    } catch (e) {
+      // postMessage to a cross-origin parent should not fail with '*' targetOrigin,
+      // but if the page is sandboxed without scripts-can-message, swallow.
+    }
+  }
+  window.addEventListener('error', function (ev) {
+    forward({
+      message: ev.message || (ev.error && ev.error.message) || 'Unknown error',
+      source: ev.filename,
+      lineno: ev.lineno,
+      colno: ev.colno,
+      stack: ev.error && ev.error.stack ? String(ev.error.stack).slice(0, 4000) : undefined,
+    });
+  });
+  window.addEventListener('unhandledrejection', function (ev) {
+    var reason = ev.reason;
+    var message = (reason && (reason.message || String(reason))) || 'Unhandled promise rejection';
+    var stack = reason && reason.stack ? String(reason.stack).slice(0, 4000) : undefined;
+    forward({ message: 'Unhandled rejection: ' + message, stack });
+  });
+})();
+`,
+  },
+  {
+    id: 'multi-tenant-agent-host',
+    title: 'Multi-tenant agent host (runs INSIDE a shared Blaxel sandbox; isolates tenants via vm contexts)',
+    tags: ['shared-sandbox', 'free-tier', 'multi-tenant-host'],
+    purpose:
+      'For Argo free-tier deployments, multiple users\' agents share one Blaxel sandbox. This host process accepts HMAC-signed control-plane installs and runs each tenant\'s agent in an isolated Node vm context, with per-slot Mongo collection prefixes and per-slot Fastify rate limits. Adapt the auth secret, slot capacity, and rate-limit numbers; do not weaken HMAC verification.',
+    hintedPath: 'host/multi-tenant-host.js',
+    language: 'js',
+    body: `import Fastify from 'fastify';
+import rateLimit from '@fastify/rate-limit';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import vm from 'node:vm';
+
+const HOST_SECRET = process.env.HOST_HMAC_SECRET; // injected by control plane
+const MAX_SLOTS = parseInt(process.env.MAX_SLOTS ?? '2', 10);
+if (!HOST_SECRET) throw new Error('HOST_HMAC_SECRET required');
+
+// slot id -> { tenantId, agentName, sandbox: vm.Context, run: fn, lastInvokedAt }
+const slots = new Map();
+
+function verifyControlSig(rawBody, sigHeader) {
+  if (!sigHeader || !sigHeader.startsWith('sha256=')) return false;
+  const provided = Buffer.from(sigHeader.slice(7), 'hex');
+  const expected = createHmac('sha256', HOST_SECRET).update(rawBody).digest();
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
+}
+
+const app = Fastify({ logger: true, bodyLimit: 5 * 1024 * 1024 });
+await app.register(rateLimit, { global: false });
+
+// Raw body capture for control-plane HMAC verification.
+app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
+  req.rawBody = body;
+  try { done(null, JSON.parse(body.toString('utf8'))); } catch (e) { done(e); }
+});
+
+// Control plane: install a tenant's agent into a slot.
+app.post('/api/slots/install', async (req, reply) => {
+  if (!verifyControlSig(req.rawBody, req.headers['x-argo-signature'])) {
+    return reply.code(401).send({ error: 'bad_signature' });
+  }
+  const { slotId, tenantId, agentName, source } = req.body;
+  if (slots.size >= MAX_SLOTS && !slots.has(slotId)) {
+    return reply.code(409).send({ error: 'host_full' });
+  }
+  // Per-tenant context: only stdlib + a curated bridge object.
+  const ctx = vm.createContext({
+    console,
+    fetch,
+    URL,
+    URLSearchParams,
+    setTimeout, clearTimeout, setInterval, clearInterval,
+    // Mongo collections are namespaced per slot to prevent cross-tenant reads.
+    argo: {
+      slotId, tenantId, agentName,
+      collectionName: (name) => 'slot_' + slotId + '_' + name,
+    },
+  });
+  const wrapped = '(function(){' + source + '\\nreturn module.exports || exports;})()';
+  const exports = vm.runInContext(wrapped, ctx, { timeout: 5000 });
+  if (typeof exports?.run !== 'function') {
+    return reply.code(400).send({ error: 'agent_must_export_run' });
+  }
+  slots.set(slotId, { tenantId, agentName, ctx, run: exports.run, lastInvokedAt: 0 });
+  return { ok: true, installed: slotId };
+});
+
+// Control plane: uninstall.
+app.post('/api/slots/uninstall', async (req, reply) => {
+  if (!verifyControlSig(req.rawBody, req.headers['x-argo-signature'])) {
+    return reply.code(401).send({ error: 'bad_signature' });
+  }
+  slots.delete(req.body.slotId);
+  return { ok: true };
+});
+
+// Data plane: per-slot rate-limited execution.
+app.post('/api/slots/:slotId/run', {
+  config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+}, async (req, reply) => {
+  const slot = slots.get(req.params.slotId);
+  if (!slot) return reply.code(404).send({ error: 'slot_not_installed' });
+  slot.lastInvokedAt = Date.now();
+  try {
+    const result = await Promise.race([
+      slot.run(req.body ?? {}),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 30000)),
+    ]);
+    return { ok: true, slotId: req.params.slotId, result };
+  } catch (e) {
+    req.log.error({ slotId: req.params.slotId, err: e?.message }, 'slot_run_failed');
+    return reply.code(500).send({ ok: false, error: e?.message ?? 'run_failed' });
+  }
+});
+
+app.get('/health', async () => ({ ok: true, slots: slots.size, max: MAX_SLOTS }));
+await app.listen({ port: parseInt(process.env.PORT ?? '8080', 10), host: '0.0.0.0' });
+`,
+  },
+  {
+    id: 'skills-directory-pattern',
+    title: 'Skills directory — every skills/<name>/SKILL.md is auto-registered as an agent tool (OpenClaw-inspired)',
+    tags: ['skills', 'agent-extensibility', 'every-build-with-skills'],
+    purpose:
+      'OpenClaw demonstrated that a skills/ directory with self-describing SKILL.md frontmatter is a powerful pattern: drop a folder in, the agent gains a capability, no code change. This snippet ports that pattern to Argo: at boot we scan skills/<name>/SKILL.md, parse YAML-ish frontmatter (name, description, inputSchema), and register each skill as a defineTool() entry the agent can call. The skill body itself is a JS file at skills/<name>/skill.js exporting an async run(input).',
+    hintedPath: 'agents/skills-loader.js',
+    language: 'js',
+    body: `import { readFile, readdir, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { defineTool } from '@argo/agent';
+
+// Tiny YAML-frontmatter parser (no deps; only top-level scalar + JSON values).
+function parseFrontmatter(md) {
+  const m = md.match(/^---\\r?\\n([\\s\\S]*?)\\r?\\n---/);
+  if (!m) return { meta: {}, body: md };
+  const out = {};
+  for (const line of m[1].split(/\\r?\\n/)) {
+    const kv = line.match(/^([a-zA-Z_][\\w-]*):\\s*(.*)$/);
+    if (!kv) continue;
+    const k = kv[1];
+    let v = kv[2].trim();
+    // Try JSON first (handles arrays / objects / quoted strings cleanly).
+    try { out[k] = JSON.parse(v); continue; } catch {}
+    out[k] = v;
+  }
+  return { meta: out, body: md.slice(m[0].length) };
+}
+
+async function loadSkill(skillsRoot, dirName) {
+  const dir = join(skillsRoot, dirName);
+  const skillMdPath = join(dir, 'SKILL.md');
+  const skillJsPath = join(dir, 'skill.js');
+  const md = await readFile(skillMdPath, 'utf8');
+  const { meta } = parseFrontmatter(md);
+  if (!meta.name || !meta.description) {
+    throw new Error('Skill ' + dirName + ': SKILL.md needs name + description in frontmatter');
+  }
+  const mod = await import(skillJsPath);
+  if (typeof mod.run !== 'function') {
+    throw new Error('Skill ' + dirName + ': skill.js must export async function run(input)');
+  }
+  return defineTool({
+    name: meta.name,
+    description: meta.description,
+    inputSchema: meta.inputSchema ?? { type: 'object', additionalProperties: true },
+    handler: async (input, ctx) => mod.run(input, ctx),
+  });
+}
+
+export async function loadSkillsDirectory(skillsRoot = './skills') {
+  let entries;
+  try { entries = await readdir(skillsRoot); } catch { return []; }
+  const tools = [];
+  for (const name of entries) {
+    try {
+      const s = await stat(join(skillsRoot, name));
+      if (!s.isDirectory()) continue;
+      tools.push(await loadSkill(skillsRoot, name));
+    } catch (e) {
+      console.warn('skill_load_failed', { name, err: e?.message });
+    }
+  }
+  return tools;
+}
+
+// Usage in your agent boot:
+//   const skillTools = await loadSkillsDirectory('./skills');
+//   const agent = createAgent({ name: 'main', tools: [...builtinTools, ...skillTools] });
+`,
+  },
 ];
 
 /**

@@ -22,12 +22,20 @@ import { BundleDiffViewer } from './BundleDiffViewer.js';
 import { ReplayPanel } from './ReplayPanel.js';
 import { NotificationsInbox } from './NotificationsInbox.js';
 import { MemoryPanel } from './MemoryPanel.js';
+import { PreviewErrorOverlay } from './PreviewErrorOverlay.js';
 import { cn } from '../lib/utils.js';
 
 export type PreviewTab = 'preview' | 'code' | 'diff' | 'replay' | 'inbox' | 'memory';
 
 interface PreviewPaneProps {
   operation: Operation | null;
+  /**
+   * Optional callback invoked when the preview-error overlay's
+   * "Ask Argo to fix it" button is clicked. The handler should send
+   * the prompt to the chat send pipeline. If omitted, the button is
+   * still rendered but the overlay falls back to copying to clipboard.
+   */
+  onAskArgo?: (prompt: string) => void;
 }
 
 /**
@@ -52,7 +60,7 @@ const DEVICE_DIMENSIONS: Record<DeviceFrame, { width: number; height: number; la
   mobile: { width: 390, height: 844, label: 'iPhone 14' },
 };
 
-export function PreviewPane({ operation }: PreviewPaneProps) {
+export function PreviewPane({ operation, onAskArgo }: PreviewPaneProps) {
   const [tab, setTab] = useState<PreviewTab>('preview');
   const [iframeKey, setIframeKey] = useState(0);
   const [busyAction, setBusyAction] = useState<PreviewAction | null>(null);
@@ -171,11 +179,23 @@ export function PreviewPane({ operation }: PreviewPaneProps) {
               className="absolute inset-0"
             >
               {operation.publicUrl ? (
-                <DeviceFramedIframe
-                  key={`${iframeKey}-${device}`}
-                  src={operation.publicUrl}
-                  device={device}
-                />
+                <>
+                  <DeviceFramedIframe
+                    key={`${iframeKey}-${device}`}
+                    src={operation.publicUrl}
+                    device={device}
+                  />
+                  <PreviewErrorOverlay
+                    publicUrl={operation.publicUrl}
+                    onAskArgo={(prompt) => {
+                      if (onAskArgo) {
+                        onAskArgo(prompt);
+                      } else if (typeof navigator !== 'undefined' && navigator.clipboard) {
+                        void navigator.clipboard.writeText(prompt);
+                      }
+                    }}
+                  />
+                </>
               ) : (
                 <div className="h-full flex items-center justify-center text-center text-argo-textSecondary px-12">
                   <div className="max-w-sm">

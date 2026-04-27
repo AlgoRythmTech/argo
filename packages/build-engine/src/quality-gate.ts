@@ -55,7 +55,13 @@ export type QualityCheckId =
   | 'no_unhandled_zod_safe_parse'
   | 'no_async_in_top_level_route_handlers_without_try'
   | 'agent_sdk_used_when_llm_called'
-  | 'mailer_uses_escape_for_email';
+  | 'mailer_uses_escape_for_email'
+  // ── v5 hardening (Day 4 part 22): agent-build invariants ──
+  | 'agent_name_unique_in_bundle'
+  | 'tool_name_unique_in_bundle'
+  | 'agent_has_output_schema'
+  | 'workflow_steps_have_names'
+  | 'durable_workflow_step_idempotency';
 
 export interface QualityIssue {
   check: QualityCheckId;
@@ -118,6 +124,12 @@ export function runQualityGate(bundle: OperationBundle): QualityReport {
   issues.push(...checkEvalSuitePresentWhenLlmUsed(bundle));
   issues.push(...checkAgentSdkUsedWhenLlmCalled(bundle));
   issues.push(...checkMailerUsesEscape(bundle));
+  // v5 hardening — agent-build invariants
+  issues.push(...checkAgentNameUniqueness(bundle));
+  issues.push(...checkToolNameUniqueness(bundle));
+  issues.push(...checkAgentOutputSchema(bundle));
+  issues.push(...checkWorkflowStepsHaveNames(bundle));
+  issues.push(...checkDurableWorkflowIdempotency(bundle));
   for (const file of bundle.files) {
     issues.push(...checkNoDotenvImport(file));
     issues.push(...checkNoUnhandledZodSafeParse(file));
@@ -1077,6 +1089,179 @@ function checkMailerUsesEscape(bundle: OperationBundle): QualityIssue[] {
         line: null,
         message: 'Mailer template interpolates values but never calls escapeForEmail(). Wrap every ${...} in escapeForEmail() — cribbing user input straight into HTML email is an XSS risk.',
       });
+    }
+  }
+  return issues;
+}
+
+// ── v5 hardening: agent-build invariants ─────────────────────────────
+
+const FILE_RE = /\.(?:m?[jt]sx?|cjs)$/i;
+
+/**
+ * Two agents with the same `name` produce identical entries in the
+ * agent_invocations cost ledger. The Replay tab can't distinguish them.
+ * Catches a common LLM failure where it pastes the same agent block twice.
+ */
+function checkAgentNameUniqueness(bundle: OperationBundle): QualityIssue[] {
+  const seen = new Map<string, string[]>();
+  for (const f of bundle.files) {
+    if (!FILE_RE.test(f.path)) continue;
+    const re = /createAgent\s*\(\s*\{[^}]*?name\s*:\s*['"]([^'"]+)['"]/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(f.contents)) !== null) {
+      const name = m[1] ?? '';
+      if (!seen.has(name)) seen.set(name, []);
+      seen.get(name)!.push(f.path);
+    }
+  }
+  const issues: QualityIssue[] = [];
+  for (const [name, paths] of seen) {
+    if (paths.length <= 1) continue;
+    issues.push({
+      check: 'agent_name_unique_in_bundle',
+      severity: 'error',
+      file: paths[0]!,
+      line: null,
+      message: `Agent name "${name}" is declared in ${paths.length} files: ${paths.join(', ')}. Two agents with the same name conflict in the cost ledger and the Replay tab. Rename one.`,
+    });
+  }
+  return issues;
+}
+
+/**
+ * Same problem as agents but for tools registered via defineTool.
+ * Two tools with the same name → only one is reachable; the other is
+ * dead code that confuses the audit trail.
+ */
+function checkToolNameUniqueness(bundle: OperationBundle): QualityIssue[] {
+  const seen = new Map<string, string[]>();
+  for (const f of bundle.files) {
+    if (!FILE_RE.test(f.path)) continue;
+    const re = /defineTool\s*\(\s*\{[^}]*?name\s*:\s*['"]([^'"]+)['"]/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(f.contents)) !== null) {
+      const name = m[1] ?? '';
+      if (!seen.has(name)) seen.set(name, []);
+      seen.get(name)!.push(f.path);
+    }
+  }
+  const issues: QualityIssue[] = [];
+  for (const [name, paths] of seen) {
+    if (paths.length <= 1) continue;
+    issues.push({
+      check: 'tool_name_unique_in_bundle',
+      severity: 'error',
+      file: paths[0]!,
+      line: null,
+      message: `Tool name "${name}" is declared in ${paths.length} files: ${paths.join(', ')}. Tool names must be unique within a bundle. Rename one.`,
+    });
+  }
+  return issues;
+}
+
+/**
+ * createAgent({ ... }) without an outputSchema is an unbounded freeform
+ * LLM call masquerading as a typed function. The whole point of the
+ * agent SDK is structured output validation. Flag every agent without
+ * a schema.
+ */
+function checkAgentOutputSchema(bundle: OperationBundle): QualityIssue[] {
+  const issues: QualityIssue[] = [];
+  for (const f of bundle.files) {
+    if (!FILE_RE.test(f.path)) continue;
+    // Match createAgent({ ... }) blocks, including multi-line content.
+    const re = /createAgent\s*\(\s*\{([\s\S]*?)\}\s*\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(f.contents)) !== null) {
+      const block = m[1] ?? '';
+      const nameMatch = block.match(/name\s*:\s*['"]([^'"]+)['"]/);
+      const name = nameMatch ? nameMatch[1] : '(unnamed)';
+      if (!/outputSchema\s*:/.test(block)) {
+        issues.push({
+          check: 'agent_has_output_schema',
+          severity: 'error',
+          file: f.path,
+          line: null,
+          message: `Agent "${name}" has no outputSchema. Every createAgent() must declare a Zod schema for the response — that's how runAgent retries on schema mismatch and how the cost ledger captures shape.`,
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+/**
+ * defineWorkflow('name', [{ ... }, { ... }]) where any step is missing
+ * a `name` makes resume-after-crash unreliable — the workflow runner
+ * persists progress by step name. Anonymous steps look identical on
+ * disk and the runner re-executes them all.
+ */
+function checkWorkflowStepsHaveNames(bundle: OperationBundle): QualityIssue[] {
+  const issues: QualityIssue[] = [];
+  for (const f of bundle.files) {
+    if (!FILE_RE.test(f.path)) continue;
+    const re = /defineWorkflow\s*\(\s*['"]([^'"]+)['"]\s*,\s*\[([\s\S]*?)\]\s*\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(f.contents)) !== null) {
+      const wfName = m[1] ?? '(unnamed)';
+      const body = m[2] ?? '';
+      // Count step blocks by counting `{ ... run:` occurrences.
+      const stepStarts = (body.match(/\{\s*[^}]*?run\s*:/g) ?? []).length;
+      const namedSteps = (body.match(/name\s*:\s*['"][^'"]+['"]/g) ?? []).length;
+      if (stepStarts > 0 && namedSteps < stepStarts) {
+        issues.push({
+          check: 'workflow_steps_have_names',
+          severity: 'error',
+          file: f.path,
+          line: null,
+          message: `Workflow "${wfName}" has ${stepStarts} steps but only ${namedSteps} are named. Every defineWorkflow step needs a unique name — the runner persists progress by name and resume-after-crash relies on it.`,
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+/**
+ * The durable workflow snippet says steps must be IDEMPOTENT (same args
+ * → same return). Operators use these for billing flows where double-
+ * charging is catastrophic. Flag any workflow step whose run function
+ * uses Math.random / Date.now / crypto.randomUUID without seeding.
+ */
+function checkDurableWorkflowIdempotency(bundle: OperationBundle): QualityIssue[] {
+  const issues: QualityIssue[] = [];
+  for (const f of bundle.files) {
+    if (!FILE_RE.test(f.path)) continue;
+    if (!/defineWorkflow\s*\(/.test(f.contents)) continue;
+    const lines = f.contents.split('\n');
+    let inWorkflow = false;
+    let braceDepth = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      if (/defineWorkflow\s*\(/.test(line)) inWorkflow = true;
+      if (inWorkflow) {
+        braceDepth += (line.match(/\{/g) ?? []).length;
+        braceDepth -= (line.match(/\}/g) ?? []).length;
+        if (
+          /\bMath\.random\(|\bDate\.now\(|\bcrypto\.randomUUID\(/.test(line) &&
+          // Skip lines that look like step args being passed (they're idempotent
+          // in the args, not in the run).
+          !/\bargs\.|input\.|ctx\./.test(line)
+        ) {
+          issues.push({
+            check: 'durable_workflow_step_idempotency',
+            severity: 'warn',
+            file: f.path,
+            line: i + 1,
+            message: `Workflow step uses Math.random/Date.now/randomUUID. Durable workflow steps must be idempotent — same input must produce same output. Move non-determinism into the input args, OR seed it from runId/stepName.`,
+          });
+        }
+        if (braceDepth <= 0 && /^\s*\)\s*;?\s*$/.test(line)) {
+          inWorkflow = false;
+          braceDepth = 0;
+        }
+      }
     }
   }
   return issues;

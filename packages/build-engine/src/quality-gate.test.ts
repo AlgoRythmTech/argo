@@ -381,4 +381,133 @@ process.on('SIGTERM',()=>{});`,
     );
     expect(r.issues.some((i) => i.check === 'mailer_uses_escape_for_email')).toBe(false);
   });
+
+  // ─── v5 hardening: agent-quality checks ───────────────────────────
+  describe('v5 agent-quality checks', () => {
+    const minimalScaffolding = [
+      { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+      {
+        path: 'server.js',
+        contents:
+          "// argo:scaffolding\nrequire('node:http').createServer().listen(3000,'0.0.0.0');\nprocess.on('SIGTERM',()=>{});",
+        argoGenerated: false,
+      },
+    ];
+
+    it('flags duplicate agent names within a bundle', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'agents/triage.js',
+            contents: "// argo:generated\nexport const a = createAgent({ name: 'triage', model: 'gpt-4o', tools: [] });",
+            argoGenerated: true,
+          },
+          {
+            path: 'agents/triage2.js',
+            contents: "// argo:generated\nexport const b = createAgent({ name: 'triage', model: 'gpt-4o-mini', tools: [] });",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'agent_name_unique_in_bundle')).toBe(true);
+    });
+
+    it('does NOT flag uniquely named agents', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'agents/triage.js',
+            contents: "// argo:generated\nexport const a = createAgent({ name: 'triage', model: 'gpt-4o', tools: [] });",
+            argoGenerated: true,
+          },
+          {
+            path: 'agents/responder.js',
+            contents: "// argo:generated\nexport const b = createAgent({ name: 'responder', model: 'gpt-4o-mini', tools: [] });",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'agent_name_unique_in_bundle')).toBe(false);
+    });
+
+    it('flags duplicate tool names', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'tools/lookup1.js',
+            contents: "// argo:generated\nexport const t1 = defineTool({ name: 'lookup_customer', description: 'x', inputSchema: {}, handler: async () => ({}) });",
+            argoGenerated: true,
+          },
+          {
+            path: 'tools/lookup2.js',
+            contents: "// argo:generated\nexport const t2 = defineTool({ name: 'lookup_customer', description: 'y', inputSchema: {}, handler: async () => ({}) });",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'tool_name_unique_in_bundle')).toBe(true);
+    });
+
+    it('flags an agent missing an outputSchema', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'agents/loose.js',
+            contents: "// argo:generated\nexport const a = createAgent({ name: 'loose', model: 'gpt-4o', tools: [], systemPrompt: 'do stuff' });",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'agent_has_output_schema')).toBe(true);
+    });
+
+    it('does NOT flag an agent with an outputSchema', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'agents/strict.js',
+            contents:
+              "// argo:generated\nimport { z } from 'zod';\nexport const a = createAgent({ name: 'strict', model: 'gpt-4o', tools: [], outputSchema: z.object({ verdict: z.string() }) });",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'agent_has_output_schema')).toBe(false);
+    });
+
+    it('flags workflows with unnamed steps', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'workflows/onboard.js',
+            contents:
+              "// argo:generated\ndefineWorkflow('onboard', [{ name: 'verify_email', run: () => undefined }, { run: () => undefined }]);",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'workflow_steps_have_names')).toBe(true);
+    });
+
+    it('does NOT flag a workflow whose every step has a name', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'workflows/onboard.js',
+            contents:
+              "// argo:generated\ndefineWorkflow('onboard', [{ name: 'verify_email', run: () => undefined }, { name: 'send_welcome', run: () => undefined }]);",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'workflow_steps_have_names')).toBe(false);
+    });
+  });
 });

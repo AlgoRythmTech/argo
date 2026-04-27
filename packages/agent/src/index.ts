@@ -17,4 +17,5 @@ export * from './supermemory/index.js';
 export * from './cost/pricing.js';
 export * from './readme/index.js';
 export * from './naming/index.js';
+export * from './manifest/index.js';
 export * from './tools/index.js';

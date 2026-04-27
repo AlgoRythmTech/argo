@@ -339,7 +339,10 @@ export function Workspace() {
                 }}
               />
             ) : (
-              <PreviewPane operation={activeOp} />
+              <PreviewPane
+                operation={activeOp}
+                onAskArgo={(prompt) => void sendPrompt(prompt, [], 'default')}
+              />
             )}
           </div>
 
