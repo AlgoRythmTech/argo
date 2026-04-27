@@ -61,7 +61,14 @@ export type QualityCheckId =
   | 'tool_name_unique_in_bundle'
   | 'agent_has_output_schema'
   | 'workflow_steps_have_names'
-  | 'durable_workflow_step_idempotency';
+  | 'durable_workflow_step_idempotency'
+  // ── v6 hardening: parser-level + bug-hunting checks ──
+  | 'bundle_syntax_valid'
+  | 'route_handler_returns_or_replies'
+  | 'await_on_async_db_call'
+  | 'zod_parse_before_mutation'
+  | 'no_console_log_in_routes'
+  | 'try_catch_logs_error';
 
 export interface QualityIssue {
   check: QualityCheckId;
@@ -82,6 +89,14 @@ export interface QualityReport {
 
 export function runQualityGate(bundle: OperationBundle): QualityReport {
   const issues: QualityIssue[] = [];
+
+  // v6: parser-level syntax validity is the FIRST gate — if a file is
+  // syntactically broken, the rest of the regex-based checks will produce
+  // misleading noise, and the deploy would crash on first import anyway.
+  // Running this first lets the auto-fix loop see the parse error first.
+  for (const file of bundle.files) {
+    issues.push(...checkSyntaxValid(file));
+  }
 
   for (const file of bundle.files) {
     issues.push(...checkHeaders(file));
@@ -130,6 +145,14 @@ export function runQualityGate(bundle: OperationBundle): QualityReport {
   issues.push(...checkAgentOutputSchema(bundle));
   issues.push(...checkWorkflowStepsHaveNames(bundle));
   issues.push(...checkDurableWorkflowIdempotency(bundle));
+  // v6 hardening — bug-hunting checks per file
+  for (const file of bundle.files) {
+    issues.push(...checkRouteHandlerReturnsOrReplies(file));
+    issues.push(...checkAwaitOnAsyncDbCall(file));
+    issues.push(...checkZodParseBeforeMutation(file));
+    issues.push(...checkNoConsoleLogInRoutes(file));
+    issues.push(...checkTryCatchLogsError(file));
+  }
   for (const file of bundle.files) {
     issues.push(...checkNoDotenvImport(file));
     issues.push(...checkNoUnhandledZodSafeParse(file));
@@ -1262,6 +1285,325 @@ function checkDurableWorkflowIdempotency(bundle: OperationBundle): QualityIssue[
           braceDepth = 0;
         }
       }
+    }
+  }
+  return issues;
+}
+
+// ── v6 hardening: parser-level + bug-hunting checks ──────────────────
+
+/**
+ * Parse every JS/TS file in the bundle. A syntax error means the deploy
+ * will crash on its first import — failing here lets the repair loop see
+ * the parser message immediately instead of debugging a runtime crash.
+ *
+ * We use Function() with a leading "return" expression to validate
+ * arbitrary statement-level JS (no eval, no execution — Function only
+ * parses; throwing happens when the parser hits a SyntaxError). For TS
+ * files we lightweight-parse by stripping the obvious type-only constructs
+ * before re-checking syntax, since we don't want to ship the full TS
+ * compiler in this package's hot path.
+ */
+function checkSyntaxValid(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs|jsx)$/i.test(f.path)) return [];
+  if (f.contents.length === 0) return [];
+
+  // Strip a #!/usr/bin/env node shebang if present — Function() can't parse it.
+  let src = f.contents.startsWith('#!') ? '// ' + f.contents : f.contents;
+
+  // Strip ESM module-level constructs that Function() can't accept.
+  // Function bodies are CommonJS-flavored, so we need to demodule the source
+  // before parsing. We only care about syntax validity — not semantics.
+  src = stripEsmForParse(src);
+
+  // For TS/TSX, strip type annotations heuristically. This is imperfect
+  // (it won't catch all parse errors a real compiler would) but it
+  // catches the common LLM mistakes: stray commas, unclosed braces,
+  // missing parens, runaway template literals.
+  if (/\.tsx?$/i.test(f.path)) {
+    src = stripTsTypesForParse(src);
+  }
+
+  try {
+    // The 'return' lets Function() accept top-level statements. We never
+    // call the resulting fn — Function only PARSES the body, throwing
+    // SyntaxError on bad input.
+    new Function(src);
+    return [];
+  } catch (e) {
+    if (e instanceof SyntaxError) {
+      const msg = e.message.slice(0, 200);
+      return [
+        {
+          check: 'bundle_syntax_valid',
+          severity: 'error',
+          file: f.path,
+          line: extractLineFromSyntaxError(msg),
+          message: `Parse error: ${msg}. The file is syntactically broken — the deploy will crash on first import.`,
+        },
+      ];
+    }
+    return [];
+  }
+}
+
+/** Strip ESM module-level constructs so Function() can parse the body. */
+function stripEsmForParse(src: string): string {
+  let out = src;
+  // import "..."; (side-effect imports)
+  out = out.replace(/^\s*import\s+['"][^'"]+['"]\s*;?\s*$/gm, '');
+  // import X from "..."; / import { x, y } from "..."; / import * as N from "...";
+  // / import type { ... } from "..."; — covers all named/default/namespace forms
+  out = out.replace(/^\s*import\s+(?:type\s+)?[^;]+\s+from\s+['"][^'"]+['"]\s*;?\s*$/gm, '');
+  // export const / export let / export var / export function / export class /
+  // export async function / export interface / export type / export enum
+  out = out.replace(
+    /\bexport\s+(?=(?:default\s+)?(?:const|let|var|function|class|async|interface|type|enum|abstract))/g,
+    '',
+  );
+  // export default <expression>;
+  out = out.replace(/\bexport\s+default\s+/g, '(0,');
+  // The above turns `export default X;` into `(0,X;` — close it. Simpler:
+  // re-handle with a cleaner pass.
+  out = out.replace(/\(0,([\s\S]*?);/g, '$1;');
+  // export { a, b } / export { a as b } / export { a } from "..."
+  out = out.replace(/^\s*export\s*\{[\s\S]*?\}\s*(?:from\s+['"][^'"]+['"])?\s*;?\s*$/gm, '');
+  // export * from "...";
+  out = out.replace(/^\s*export\s+\*\s+from\s+['"][^'"]+['"]\s*;?\s*$/gm, '');
+  return out;
+}
+
+/** Best-effort: strip TS type annotations so Function() can parse the JS. */
+function stripTsTypesForParse(src: string): string {
+  let out = src;
+  // Remove `: Type` from var/param decls (greedy until comma/parens/eq/eol).
+  // This is a heuristic — won't catch generic param lists or complex unions
+  // but handles 90% of the LLM-written code we see.
+  out = out.replace(/:\s*[A-Za-z_$][\w$<>[\]|&,\s.'"]*?(?=[=,)\];\n])/g, '');
+  // Remove `as Type` and `as const`.
+  out = out.replace(/\s+as\s+[A-Za-z_$][\w$<>[\]|&.\s]*/g, '');
+  // Remove `interface X { ... }`.
+  out = out.replace(/\binterface\s+[A-Za-z_$][\w$]*\s*\{[\s\S]*?\}/g, '');
+  // Remove `type X = ...;`.
+  out = out.replace(/\btype\s+[A-Za-z_$][\w$]*\s*=\s*[^;]+;/g, '');
+  // Remove generic params on calls: foo<T>() -> foo()
+  out = out.replace(/<[A-Z][\w<>,\s|&]*>(?=\()/g, '');
+  // Remove `import type { ... }`.
+  out = out.replace(/^\s*import\s+type\s+[^;]+;\s*$/gm, '');
+  // Strip `!` non-null assertion.
+  out = out.replace(/(\w)!(\.|,|\)|;|\s|=)/g, '$1$2');
+  return out;
+}
+
+function extractLineFromSyntaxError(msg: string): number | null {
+  const m = msg.match(/line (\d+)/i);
+  return m && m[1] ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * Every Fastify route handler must either `return` a value or call
+ * `reply.send()` / `reply.code().send()`. A handler that does neither
+ * leaves the request hanging until the connection times out.
+ */
+function checkRouteHandlerReturnsOrReplies(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs|jsx)$/i.test(f.path)) return [];
+  if (f.path.startsWith('web/')) return [];
+  const issues: QualityIssue[] = [];
+  // Match: app.get/post/put/patch/delete('/path', { schema }, async (req, reply) => { ... })
+  // OR:    app.get('/path', async (req, reply) => { ... })
+  const routeRe =
+    /\bapp\.(get|post|put|patch|delete)\s*\([^,]+,(?:[^,]+,)?\s*async\s*\(([^)]*)\)\s*=>\s*\{([\s\S]*?)\n\s*\}\s*\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = routeRe.exec(f.contents)) !== null) {
+    const body = m[3] ?? '';
+    const hasReturn = /(^|\n|\s)return\b/.test(body);
+    const hasReplySend = /\breply\.(?:code\s*\(\s*\d+\s*\)\s*\.\s*)?send\s*\(/.test(body);
+    const hasReplyRedirect = /\breply\.redirect\s*\(/.test(body);
+    if (!hasReturn && !hasReplySend && !hasReplyRedirect) {
+      const lineNo = f.contents.slice(0, m.index).split('\n').length;
+      issues.push({
+        check: 'route_handler_returns_or_replies',
+        severity: 'error',
+        file: f.path,
+        line: lineNo,
+        message:
+          `Route handler ${m[1]?.toUpperCase()} body neither returns nor calls reply.send/redirect. ` +
+          `Fastify will hang the request until timeout. End the handler with a return statement or reply.send(...).`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * MongoDB driver methods are async — calling them without await yields
+ * an unawaited Promise, the route returns prematurely, and the operation
+ * either silently fails or races its successor. Catches the common LLM
+ * forgotten-await pattern.
+ */
+function checkAwaitOnAsyncDbCall(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs|jsx)$/i.test(f.path)) return [];
+  const issues: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  // Methods on the Mongo Collection that return a Promise.
+  const ASYNC_METHODS = [
+    'insertOne', 'insertMany', 'updateOne', 'updateMany', 'deleteOne', 'deleteMany',
+    'replaceOne', 'findOne', 'findOneAndUpdate', 'findOneAndDelete', 'findOneAndReplace',
+    'countDocuments', 'distinct', 'aggregate', 'createIndex', 'bulkWrite',
+  ];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    // Skip comments.
+    if (/^\s*\/\//.test(line)) continue;
+    for (const method of ASYNC_METHODS) {
+      // pattern: ".methodName(" preceded by a word char (collection ref)
+      const re = new RegExp(`(\\w)\\.${method}\\s*\\(`);
+      if (!re.test(line)) continue;
+      // Already awaited? (await before, or `.then(` after the call, or `return` to chain)
+      if (/\bawait\b/.test(line)) continue;
+      if (/\)\s*\.\s*then\s*\(/.test(line)) continue;
+      if (/^\s*return\s/.test(line)) continue;
+      // An assignment to a non-promise variable like `const x = col.findOne()`
+      // without await is a bug. Allow `const x = await ...` (covered above).
+      // Also allow `Promise.all([col.findOne(), ...])` style.
+      if (/\bPromise\.(all|race|allSettled|any)\s*\(/.test(line)) continue;
+      issues.push({
+        check: 'await_on_async_db_call',
+        severity: 'warn',
+        file: f.path,
+        line: i + 1,
+        message:
+          `'${method}' returns a Promise but isn't awaited. The Promise resolves after the route returns; ` +
+          `state changes may not happen before the response. Add 'await' (or chain .then()).`,
+      });
+      break;
+    }
+  }
+  return issues;
+}
+
+/**
+ * Mutation routes (POST/PATCH/PUT/DELETE) must validate the request body
+ * with zod BEFORE any database write. Skipping validation lets malformed
+ * input land in the DB and propagate corruption.
+ */
+function checkZodParseBeforeMutation(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs|jsx)$/i.test(f.path)) return [];
+  if (f.path.startsWith('web/')) return [];
+  const issues: QualityIssue[] = [];
+  // The file imports zod? Any `.parse(req.body)` then counts as validation.
+  const fileImportsZod = /from\s+['"]zod['"]|require\s*\(\s*['"]zod['"]\s*\)/.test(f.contents);
+  const routeRe =
+    /\bapp\.(post|put|patch|delete)\s*\([^,]+,(?:[^,]+,)?\s*async\s*\([^)]*\)\s*=>\s*\{([\s\S]*?)\n\s*\}\s*\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = routeRe.exec(f.contents)) !== null) {
+    const body = m[2] ?? '';
+    const hasMutation =
+      /\.(insertOne|insertMany|updateOne|updateMany|deleteOne|deleteMany|replaceOne|findOneAndUpdate)\s*\(/.test(body);
+    if (!hasMutation) continue;
+    // Strict: schema-named identifier with .parse(
+    const hasNamedZod = /\b(?:[A-Z]\w*Schema|z\.\w+|\w+Schema)\.(?:parse|safeParse)\s*\(/.test(body);
+    // Loose: file imports zod AND the body has any `.parse(` or `.safeParse(`.
+    const hasLooseZod = fileImportsZod && /\b\w+\.(?:parse|safeParse)\s*\(/.test(body);
+    const hasZod = hasNamedZod || hasLooseZod;
+    // Fastify route schema config also counts (validates before handler runs).
+    // Look for ", { schema: " in the call args.
+    const openParen = m.index;
+    const callSlice = f.contents.slice(openParen, openParen + 400);
+    const hasFastifySchema = /,\s*\{\s*schema\s*:/.test(callSlice);
+    if (!hasZod && !hasFastifySchema) {
+      const lineNo = f.contents.slice(0, openParen).split('\n').length;
+      issues.push({
+        check: 'zod_parse_before_mutation',
+        severity: 'warn',
+        file: f.path,
+        line: lineNo,
+        message:
+          `Mutation route ${m[1]?.toUpperCase()} writes to the DB without validating the body with zod. ` +
+          `Add a Schema.parse(req.body) (or a Fastify { schema } config) before the write.`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * Inside a route handler, console.log bypasses pino, so the log line is
+ * un-correlated to the request and the activity feed misses it. Use
+ * req.log.info / req.log.error instead. (Distinct from the global
+ * no_console_log check — this one targets console specifically inside
+ * route handlers, where the cost is highest.)
+ */
+function checkNoConsoleLogInRoutes(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs|jsx)$/i.test(f.path)) return [];
+  if (f.path.startsWith('web/')) return [];
+  const issues: QualityIssue[] = [];
+  const routeRe =
+    /\bapp\.(get|post|put|patch|delete)\s*\([^,]+,(?:[^,]+,)?\s*async\s*\([^)]*\)\s*=>\s*\{([\s\S]*?)\n\s*\}\s*\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = routeRe.exec(f.contents)) !== null) {
+    const body = m[2] ?? '';
+    const consoleMatch = body.match(/\bconsole\.(log|info|debug|warn|error)\s*\(/);
+    if (consoleMatch) {
+      const lineOfMatch = body.slice(0, consoleMatch.index).split('\n').length;
+      const startLine = f.contents.slice(0, m.index).split('\n').length;
+      issues.push({
+        check: 'no_console_log_in_routes',
+        severity: 'warn',
+        file: f.path,
+        line: startLine + lineOfMatch - 1,
+        message:
+          `Route handler uses console.${consoleMatch[1]}. Use req.log.${consoleMatch[1] === 'log' ? 'info' : consoleMatch[1]}() instead — pino correlates the line to the request id and the activity feed picks it up.`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * A try/catch that does NOTHING (no log, no rethrow, no reply.send) silently
+ * swallows the error, leaving the operator with no signal that something
+ * went wrong. We require the catch body to either call a logger, rethrow,
+ * or send an error response.
+ */
+function checkTryCatchLogsError(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs|jsx)$/i.test(f.path)) return [];
+  const issues: QualityIssue[] = [];
+  // Match: catch (err) { ... } with body content. Allow any identifier as the binding.
+  // We use a non-greedy capture that stops at the first matching closing brace.
+  const catchRe = /catch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{([^{}]*)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = catchRe.exec(f.contents)) !== null) {
+    const errName = m[1] ?? 'err';
+    const body = m[2] ?? '';
+    const trimmed = body.trim();
+    if (trimmed.length === 0) {
+      const lineNo = f.contents.slice(0, m.index).split('\n').length;
+      issues.push({
+        check: 'try_catch_logs_error',
+        severity: 'warn',
+        file: f.path,
+        line: lineNo,
+        message:
+          `Empty catch block for "${errName}" — the error is silently swallowed. Add req.log.error({err:${errName}}) or rethrow.`,
+      });
+      continue;
+    }
+    const hasLog = /\b(?:log|logger|pino|console)\b.*\b(?:error|warn|info|debug)\b/i.test(body) ||
+                   /\b(?:req|reply|app)\.\w*log\b/.test(body);
+    const hasRethrow = new RegExp(`\\bthrow\\s+(?:${errName}|new\\s+\\w+|\\w+)`).test(body);
+    const hasReplyError = /\breply\.(?:code\s*\(\s*[45]\d\d\s*\)\s*\.\s*)?send\s*\(/.test(body);
+    if (!hasLog && !hasRethrow && !hasReplyError) {
+      const lineNo = f.contents.slice(0, m.index).split('\n').length;
+      issues.push({
+        check: 'try_catch_logs_error',
+        severity: 'warn',
+        file: f.path,
+        line: lineNo,
+        message:
+          `catch (${errName}) {...} body neither logs, rethrows, nor sends an error reply. ` +
+          `Errors silently disappear; add req.log.error({err:${errName}}) or rethrow so operators see incidents.`,
+      });
     }
   }
   return issues;

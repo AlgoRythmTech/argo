@@ -510,4 +510,235 @@ process.on('SIGTERM',()=>{});`,
       expect(r.issues.some((i) => i.check === 'workflow_steps_have_names')).toBe(false);
     });
   });
+
+  // ─── v6 hardening: parser + bug-hunting checks ────────────────────
+  describe('v6 parser + bug-hunting checks', () => {
+    const minimalScaffolding = [
+      { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+      {
+        path: 'server.js',
+        contents:
+          "// argo:scaffolding\nrequire('node:http').createServer().listen(3000,'0.0.0.0');\nprocess.on('SIGTERM',()=>{});",
+        argoGenerated: false,
+      },
+    ];
+
+    it('flags a JS file with a syntax error', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            // Stray comma inside the object literal.
+            path: 'broken.js',
+            contents: "// argo:generated\nexport const x = { a: 1,, b: 2 };",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'bundle_syntax_valid')).toBe(true);
+      expect(r.passed).toBe(false);
+    });
+
+    it('does NOT flag a syntactically valid file', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'good.js',
+            contents:
+              "// argo:generated\nexport const greet = (name) => 'hi ' + name;\nexport const id = (x) => x;",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'bundle_syntax_valid')).toBe(false);
+    });
+
+    it('does NOT flag a TS file with type annotations as a syntax error', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'typed.ts',
+            contents:
+              "// argo:generated\nexport interface Person { name: string }\nexport const greet = (p: Person): string => 'hi ' + p.name;",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'bundle_syntax_valid')).toBe(false);
+    });
+
+    it('flags a route handler that neither returns nor calls reply.send', () => {
+      const handler = `// argo:generated
+import { z } from 'zod';
+const Body = z.object({ name: z.string() });
+app.post('/api/items', async (req, reply) => {
+  const data = Body.parse(req.body);
+  await db.collection('items').insertOne(data);
+});`;
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          { path: 'routes/items.js', contents: handler, argoGenerated: true },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'route_handler_returns_or_replies')).toBe(true);
+    });
+
+    it('does NOT flag a route handler that returns', () => {
+      const handler = `// argo:generated
+import { z } from 'zod';
+const Body = z.object({ name: z.string() });
+app.post('/api/items', async (req, reply) => {
+  const data = Body.parse(req.body);
+  await db.collection('items').insertOne(data);
+  return { ok: true };
+});`;
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          { path: 'routes/items.js', contents: handler, argoGenerated: true },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'route_handler_returns_or_replies')).toBe(false);
+    });
+
+    it('flags a forgotten await on a Mongo insertOne', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'routes/forgot-await.js',
+            contents:
+              "// argo:generated\nasync function save(col, doc) { col.insertOne(doc); return { ok: true }; }",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'await_on_async_db_call')).toBe(true);
+    });
+
+    it('does NOT flag an awaited db call', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'routes/good-await.js',
+            contents:
+              "// argo:generated\nasync function save(col, doc) { await col.insertOne(doc); return { ok: true }; }",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'await_on_async_db_call')).toBe(false);
+    });
+
+    it('flags a POST mutation that writes to DB without zod validation', () => {
+      const handler = `// argo:generated
+app.post('/api/items', async (req, reply) => {
+  await db.collection('items').insertOne(req.body);
+  return reply.send({ ok: true });
+});`;
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          { path: 'routes/no-zod.js', contents: handler, argoGenerated: true },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'zod_parse_before_mutation')).toBe(true);
+    });
+
+    it('does NOT flag a mutation that uses zod parse first', () => {
+      const handler = `// argo:generated
+import { z } from 'zod';
+const Body = z.object({ name: z.string() });
+app.post('/api/items', async (req, reply) => {
+  const data = Body.parse(req.body);
+  await db.collection('items').insertOne(data);
+  return reply.send({ ok: true });
+});`;
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          { path: 'routes/with-zod.js', contents: handler, argoGenerated: true },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'zod_parse_before_mutation')).toBe(false);
+    });
+
+    it('flags console.log inside a route handler', () => {
+      const handler = `// argo:generated
+app.get('/api/x', async (req, reply) => {
+  console.log('hello');
+  return { ok: true };
+});`;
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          { path: 'routes/log.js', contents: handler, argoGenerated: true },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'no_console_log_in_routes')).toBe(true);
+    });
+
+    it('does NOT flag req.log.info inside a route handler', () => {
+      const handler = `// argo:generated
+app.get('/api/x', async (req, reply) => {
+  req.log.info('hello');
+  return { ok: true };
+});`;
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          { path: 'routes/loglog.js', contents: handler, argoGenerated: true },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'no_console_log_in_routes')).toBe(false);
+    });
+
+    it('flags an empty catch block', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'lib/swallow.js',
+            contents: "// argo:generated\nasync function f() { try { await g(); } catch (e) {} }",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'try_catch_logs_error')).toBe(true);
+    });
+
+    it('flags a catch that swallows without logging or rethrowing', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'lib/swallow2.js',
+            contents:
+              "// argo:generated\nasync function f() { try { await g(); } catch (e) { return null; } }",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'try_catch_logs_error')).toBe(true);
+    });
+
+    it('does NOT flag a catch that logs and rethrows', () => {
+      const r = runQualityGate(
+        bundleWith([
+          ...minimalScaffolding,
+          {
+            path: 'lib/good-catch.js',
+            contents:
+              "// argo:generated\nasync function f(req) { try { await g(); } catch (e) { req.log.error({err:e}); throw e; } }",
+            argoGenerated: true,
+          },
+        ]),
+      );
+      expect(r.issues.some((i) => i.check === 'try_catch_logs_error')).toBe(false);
+    });
+  });
 });
