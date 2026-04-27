@@ -14,10 +14,20 @@ import {
   type ScopingQuestionnaire,
 } from '../api/scoping.js';
 
+type Rationale = { questionId: string; rationale: string };
+
 type Phase =
   | { kind: 'intro' }
   | { kind: 'generating' }
-  | { kind: 'answering'; questionnaire: ScopingQuestionnaire }
+  | { kind: 'answering'; questionnaire: ScopingQuestionnaire; round: 1 }
+  | { kind: 'refining' }
+  | {
+      kind: 'answering';
+      questionnaire: ScopingQuestionnaire;
+      round: 2;
+      refinementSummary: string;
+      rationales: Rationale[];
+    }
   | { kind: 'finalizing' }
   | { kind: 'done'; buildPrompt: string }
   | { kind: 'error'; message: string };
@@ -48,20 +58,70 @@ export function ScopingPanel({ operationId, initialSentence, onBriefReady }: Sco
     try {
       const q = await scoping.start(operationId, sentence.trim());
       setAnswers(new Map());
-      setPhase({ kind: 'answering', questionnaire: q });
+      setPhase({ kind: 'answering', questionnaire: q, round: 1 });
     } catch (err) {
       setPhase({ kind: 'error', message: String(err).slice(0, 240) });
     }
   }
 
+  /**
+   * Round-1 "Build" click. We ALWAYS try refinement first — the LLM
+   * decides whether the brief is crisp enough to skip a second round.
+   * If GPT-5.5 returns 1-3 follow-ups, we re-enter the answering phase
+   * with the smaller refinement questionnaire (the operator's prior
+   * answers are preserved server-side via priorSubmission and merged
+   * by /finalize).
+   */
+  async function tryRefineThenFinalize() {
+    if (phase.kind !== 'answering' || phase.round !== 1) return;
+    setPhase({ kind: 'refining' });
+    const round1Submission = {
+      questionnaireId: phase.questionnaire.id,
+      answers: Array.from(answers.values()),
+    };
+    let refine;
+    try {
+      refine = await scoping.refine(operationId, round1Submission);
+    } catch (err) {
+      // Refinement should NEVER block the build — fall through to finalize.
+      refine = { refined: false, refinementSummary: 'skipped', warning: String(err).slice(0, 120) };
+    }
+    if (refine.refined && refine.questionnaire) {
+      // Reset answers map; the refinement questionnaire is its own form.
+      setAnswers(new Map());
+      setPhase({
+        kind: 'answering',
+        questionnaire: refine.questionnaire,
+        round: 2,
+        refinementSummary: refine.refinementSummary,
+        rationales: refine.rationales ?? [],
+      });
+      return;
+    }
+    // No refinement needed — go straight to finalize with round-1 answers.
+    await finalizeWith(round1Submission);
+  }
+
   async function finalize() {
     if (phase.kind !== 'answering') return;
+    if (phase.round === 1) {
+      void tryRefineThenFinalize();
+      return;
+    }
+    // Round 2 — submit refinement answers; server merges with prior round.
+    await finalizeWith({
+      questionnaireId: phase.questionnaire.id,
+      answers: Array.from(answers.values()),
+    });
+  }
+
+  async function finalizeWith(submission: {
+    questionnaireId: string;
+    answers: QuestionAnswer[];
+  }) {
     setPhase({ kind: 'finalizing' });
     try {
-      const result = await scoping.finalize(operationId, {
-        questionnaireId: phase.questionnaire.id,
-        answers: Array.from(answers.values()),
-      });
+      const result = await scoping.finalize(operationId, submission);
       setPhase({ kind: 'done', buildPrompt: result.buildPrompt });
       onBriefReady(result.buildPrompt);
     } catch (err) {
@@ -91,13 +151,17 @@ export function ScopingPanel({ operationId, initialSentence, onBriefReady }: Sco
         {phase.kind === 'generating' && <GeneratingState key="generating" sentence={sentence} />}
         {phase.kind === 'answering' && (
           <AnsweringState
-            key="answering"
+            key={`answering-${phase.round}`}
             questionnaire={phase.questionnaire}
             answers={answers}
             onAnswer={setAnswer}
             onFinalize={() => void finalize()}
+            round={phase.round}
+            refinementSummary={phase.round === 2 ? phase.refinementSummary : undefined}
+            rationales={phase.round === 2 ? phase.rationales : undefined}
           />
         )}
+        {phase.kind === 'refining' && <RefiningState key="refining" />}
         {phase.kind === 'finalizing' && <FinalizingState key="finalizing" />}
         {phase.kind === 'done' && <DoneState key="done" buildPrompt={phase.buildPrompt} />}
         {phase.kind === 'error' && (
@@ -181,11 +245,17 @@ function AnsweringState({
   answers,
   onAnswer,
   onFinalize,
+  round,
+  refinementSummary,
+  rationales,
 }: {
   questionnaire: ScopingQuestionnaire;
   answers: Map<string, QuestionAnswer>;
   onAnswer: (q: ScopingQuestion, a: QuestionAnswer) => void;
   onFinalize: () => void;
+  round: 1 | 2;
+  refinementSummary?: string;
+  rationales?: Rationale[];
 }) {
   const requiredAnswered = useMemo(
     () =>
@@ -198,6 +268,13 @@ function AnsweringState({
   const answeredCount = questionnaire.questions.filter((q) =>
     isAnswered(q, answers.get(q.id)),
   ).length;
+  const rationaleByQ = useMemo(() => {
+    const m = new Map<string, string>();
+    (rationales ?? []).forEach((r) => m.set(r.questionId, r.rationale));
+    return m;
+  }, [rationales]);
+
+  const isRound2 = round === 2;
 
   return (
     <motion.div
@@ -211,53 +288,77 @@ function AnsweringState({
         <div className="flex items-center justify-between mb-1">
           <div className="flex items-center gap-2 text-argo-accent">
             <Sparkles className="h-4 w-4" />
-            <span className="text-xs uppercase tracking-widest">Scoping · {questionnaire.specialist.replace(/_/g, ' ')}</span>
+            <span className="text-xs uppercase tracking-widest">
+              {isRound2
+                ? 'Scoping · refinement round'
+                : `Scoping · ${questionnaire.specialist.replace(/_/g, ' ')}`}
+            </span>
           </div>
           <span className="text-xs text-argo-textSecondary font-mono">
             {answeredCount} / {total}
           </span>
         </div>
         <h2 className="text-2xl text-argo-text argo-hero mb-2">{questionnaire.detectedSummary}</h2>
-        <p className="text-argo-textSecondary text-sm argo-body mb-8">
-          Argo will use these answers to build a production-grade backend with no follow-up
-          questions. Take 30 seconds — every click sharpens the output.
+        <p className="text-argo-textSecondary text-sm argo-body mb-6">
+          {isRound2
+            ? `GPT-5.5 read your first answers and asked ${total} sharper question${total === 1 ? '' : 's'} to lock the brief. Last step before the build.`
+            : 'Argo will use these answers to build a production-grade backend with no follow-up questions. Take 30 seconds — every click sharpens the output.'}
         </p>
 
+        {isRound2 && refinementSummary && (
+          <div className="rounded-lg border border-argo-accent/30 bg-argo-accent/10 px-4 py-3 mb-6">
+            <div className="flex items-start gap-2">
+              <Sparkles className="h-3.5 w-3.5 text-argo-accent mt-0.5 flex-shrink-0" />
+              <p className="text-sm text-argo-text argo-body">{refinementSummary}</p>
+            </div>
+          </div>
+        )}
+
         <ol className="space-y-6">
-          {questionnaire.questions.map((q, idx) => (
-            <motion.li
-              key={q.id}
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3, delay: idx * 0.06, ease: [0.16, 1, 0.3, 1] }}
-              className="rounded-xl border border-argo-border bg-argo-surface p-5"
-            >
-              <div className="flex items-start gap-3 mb-3">
-                <span className="flex-shrink-0 inline-flex items-center justify-center w-6 h-6 rounded-full bg-argo-accent/15 text-argo-accent text-xs font-mono">
-                  {idx + 1}
-                </span>
-                <div className="flex-1">
-                  <div className="text-argo-text font-medium leading-snug">{q.prompt}</div>
-                  {q.helper && (
-                    <div className="text-argo-textSecondary text-sm mt-0.5 argo-body">
-                      {q.helper}
-                    </div>
-                  )}
+          {questionnaire.questions.map((q, idx) => {
+            const why = rationaleByQ.get(q.id);
+            return (
+              <motion.li
+                key={q.id}
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.3, delay: idx * 0.06, ease: [0.16, 1, 0.3, 1] }}
+                className="rounded-xl border border-argo-border bg-argo-surface p-5"
+              >
+                <div className="flex items-start gap-3 mb-3">
+                  <span className="flex-shrink-0 inline-flex items-center justify-center w-6 h-6 rounded-full bg-argo-accent/15 text-argo-accent text-xs font-mono">
+                    {idx + 1}
+                  </span>
+                  <div className="flex-1">
+                    <div className="text-argo-text font-medium leading-snug">{q.prompt}</div>
+                    {q.helper && (
+                      <div className="text-argo-textSecondary text-sm mt-0.5 argo-body">
+                        {q.helper}
+                      </div>
+                    )}
+                    {why && (
+                      <div className="mt-2 text-[11px] text-argo-accent/90 font-mono uppercase tracking-wider">
+                        Why: <span className="text-argo-textSecondary normal-case tracking-normal font-sans">{why}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-              <QuestionAnswerControl
-                question={q}
-                answer={answers.get(q.id)}
-                onChange={(a) => onAnswer(q, a)}
-              />
-            </motion.li>
-          ))}
+                <QuestionAnswerControl
+                  question={q}
+                  answer={answers.get(q.id)}
+                  onChange={(a) => onAnswer(q, a)}
+                />
+              </motion.li>
+            );
+          })}
         </ol>
 
         <div className="sticky bottom-0 mt-8 -mx-8 px-8 py-4 bg-gradient-to-t from-argo-bg via-argo-bg to-transparent flex items-center justify-between">
           <span className="text-xs text-argo-textSecondary">
             {requiredAnswered
-              ? 'Looks great. Click Build to generate the stack.'
+              ? isRound2
+                ? 'Brief locked. Click Build to compile and ship to GPT-5.5.'
+                : 'Looks great. Argo will check whether anything needs sharpening.'
               : `Answer the required questions to continue.`}
           </span>
           <button
@@ -266,9 +367,30 @@ function AnsweringState({
             disabled={!requiredAnswered}
             className="inline-flex items-center gap-2 rounded-full bg-argo-accent text-argo-bg px-5 py-2.5 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-argo-accent/90 transition-colors"
           >
-            Build the stack <ArrowRight className="h-4 w-4" />
+            {isRound2 ? 'Build the stack' : 'Continue'} <ArrowRight className="h-4 w-4" />
           </button>
         </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function RefiningState() {
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.2 }}
+      className="m-auto w-full max-w-md px-8 py-12 text-center"
+    >
+      <Loader2 className="h-8 w-8 text-argo-accent animate-spin mx-auto mb-6" />
+      <div className="text-argo-text argo-hero text-xl mb-2">
+        Checking the brief for gaps…
+      </div>
+      <div className="text-argo-textSecondary text-sm argo-body">
+        GPT-5.5 is reading your answers. If everything's crisp, we go straight to build.
+        Otherwise it'll ask 1–3 sharper questions.
       </div>
     </motion.div>
   );

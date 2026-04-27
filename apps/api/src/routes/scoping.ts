@@ -137,13 +137,17 @@ export async function registerScopingRoutes(app: FastifyInstance) {
 
     if (result.refined && result.questionnaire) {
       // Persist the follow-up questionnaire so /finalize can find it
-      // when the operator submits the second round.
+      // when the operator submits the second round. We attach BOTH
+      // the prior questionnaire id AND the prior submission so the
+      // finalize handler can merge round-1 + round-2 answers without
+      // re-asking the operator anything.
       await db.collection('scoping_questionnaires').insertOne({
         _id: result.questionnaire.id as unknown as never,
         ...result.questionnaire,
         operationId: op.id,
         ownerId: session.userId,
         priorQuestionnaireId: questionnaireParsed.data.id,
+        priorSubmission: parsed.data.submission,
         kind: 'refinement',
         persistedAt: new Date().toISOString(),
       } as Record<string, unknown>);
@@ -185,11 +189,44 @@ export async function registerScopingRoutes(app: FastifyInstance) {
       return reply.code(500).send({ error: 'questionnaire_corrupt' });
     }
 
+    // If this is a refinement-round questionnaire, fold the prior
+    // round's questions+answers in so compileBrief sees the FULL
+    // operator intent. Without this, refinement answers would
+    // overwrite a brief built from defaults instead of round 1.
+    let mergedQuestionnaire = questionnaireParsed.data;
+    let mergedSubmission = parsed.data.submission;
+    if (questionnaireDoc.kind === 'refinement' && questionnaireDoc.priorQuestionnaireId) {
+      const priorDoc = await db
+        .collection('scoping_questionnaires')
+        .findOne({ id: String(questionnaireDoc.priorQuestionnaireId) });
+      const priorParsed = priorDoc ? ScopingQuestionnaire.safeParse(priorDoc) : null;
+      const priorSubmission = (questionnaireDoc.priorSubmission ?? null) as
+        | { answers?: Array<{ questionId: string; selectedOptionIds?: string[]; textValue?: string }> }
+        | null;
+      if (priorParsed?.success && priorSubmission?.answers) {
+        mergedQuestionnaire = {
+          ...questionnaireParsed.data,
+          // Prior questions FIRST so refinement (last write wins per
+          // briefField) overrides only when the operator chose to.
+          questions: [...priorParsed.data.questions, ...questionnaireParsed.data.questions],
+        };
+        const normalizedPrior = priorSubmission.answers.map((a) => ({
+          questionId: String(a.questionId),
+          selectedOptionIds: a.selectedOptionIds ?? [],
+          ...(a.textValue !== undefined ? { textValue: String(a.textValue) } : {}),
+        }));
+        mergedSubmission = {
+          questionnaireId: questionnaireParsed.data.id,
+          answers: [...normalizedPrior, ...parsed.data.submission.answers],
+        };
+      }
+    }
+
     let brief;
     try {
       brief = compileBrief({
-        questionnaire: questionnaireParsed.data,
-        submission: parsed.data.submission,
+        questionnaire: mergedQuestionnaire,
+        submission: mergedSubmission,
         fallbackName: op.name,
         ownerEmail: session.email,
       });
