@@ -231,6 +231,21 @@ export const operations = {
       argoGenerated: boolean;
       bytes: number;
     }>(`/api/operations/${id}/files/contents?path=${encodeURIComponent(path)}`),
+  readme: (id: string, regenerate = false) =>
+    api.get<{
+      operationId: string;
+      bundleVersion: number | null;
+      generatedAt: string;
+      cached: boolean;
+      readme: {
+        title: string;
+        oneLine: string;
+        whatItDoes: string;
+        howItWorks: string;
+        ifSomethingBreaks: string;
+      };
+      markdown: string;
+    }>(`/api/operations/${id}/readme${regenerate ? '?regenerate=true' : ''}`),
   searchBundle: (id: string, q: string, caseSensitive = false) => {
     const qs = new URLSearchParams({ q });
     if (caseSensitive) qs.set('caseSensitive', 'true');

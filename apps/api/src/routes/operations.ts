@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
+import { composeOperationReadme, renderReadmeAsMarkdown, type OperationReadme } from '@argo/agent';
 import { getPrisma } from '../db/prisma.js';
 import { getMongo } from '../db/mongo.js';
 import { requireSession } from '../plugins/auth-plugin.js';
 import { appendActivity, recentActivity } from '../stores/activity-store.js';
+import { logger } from '../logger.js';
 
 const CreateOperationBody = z.object({
   name: z.string().min(3).max(80),
@@ -505,6 +507,143 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
       fileCount: fileResults.length,
       truncated,
       files: fileResults,
+    });
+  });
+
+  /**
+   * GET /api/operations/:id/readme[?regenerate=true]
+   *
+   * On-demand operation README. Cached per (operationId, bundleVersion)
+   * in the operation_readmes collection so we don't re-burn $0.05 of
+   * GPT-5.5 every time the modal opens. Pass regenerate=true to bust
+   * the cache (operator clicks "Regenerate" if a brief change makes
+   * the cached one stale).
+   *
+   * Falls back gracefully when no brief or no bundle exists yet.
+   */
+  app.get('/api/operations/:id/readme', async (request, reply) => {
+    const session = requireSession(request, reply);
+    if (!session) return;
+    const id = String((request.params as { id: string }).id);
+    const regenerate =
+      String((request.query as { regenerate?: string }).regenerate ?? '').toLowerCase() === 'true';
+
+    const op = await getPrisma().operation.findFirst({ where: { id, ownerId: session.userId } });
+    if (!op) return reply.code(404).send({ error: 'not_found' });
+
+    const { db } = await getMongo();
+
+    const bundle = await db
+      .collection('operation_bundles')
+      .find({ operationId: op.id })
+      .sort({ version: -1 })
+      .limit(1)
+      .next();
+    const bundleVersion = (bundle as { version?: number } | null)?.version ?? null;
+    const filePaths =
+      ((bundle as { files?: Array<{ path: string }>; filesSummary?: Array<{ path: string }> } | null)
+        ?.files ??
+        (bundle as { filesSummary?: Array<{ path: string }> } | null)?.filesSummary ??
+        []).map((f) => f.path);
+    const newDependencies = (
+      (bundle as { manifest?: { dependencies?: Record<string, string> } } | null)?.manifest
+        ?.dependencies ?? {}
+    );
+    const depsList = Object.keys(newDependencies);
+
+    if (!regenerate && bundleVersion != null) {
+      const cached = await db
+        .collection('operation_readmes')
+        .findOne({ operationId: op.id, bundleVersion });
+      if (cached) {
+        return reply.send({
+          operationId: op.id,
+          bundleVersion,
+          generatedAt: cached.generatedAt,
+          cached: true,
+          readme: cached.readme,
+          markdown: renderReadmeAsMarkdown(cached.readme as OperationReadme),
+        });
+      }
+    }
+
+    const briefDoc = await db
+      .collection('project_briefs')
+      .find({ operationId: op.id })
+      .sort({ persistedAt: -1 })
+      .limit(1)
+      .next();
+    if (!briefDoc) {
+      return reply.code(409).send({
+        error: 'no_brief_yet',
+        message: 'Finalize the scoping questionnaire first — Argo writes the README from your brief.',
+      });
+    }
+
+    type Brief = {
+      name?: string;
+      audience?: string;
+      outcome?: string;
+      trigger?: string;
+      integrations?: string[];
+      auth?: string;
+      persistence?: string;
+      successCriteria?: string[];
+      voiceTone?: string | null;
+      replyStyle?: string;
+      complianceNotes?: string | null;
+    };
+    const brief = briefDoc as Brief;
+
+    let readme: OperationReadme;
+    try {
+      readme = await composeOperationReadme({
+        operationName: op.name,
+        brief: {
+          name: brief.name ?? op.name,
+          audience: brief.audience ?? 'the operator',
+          outcome: brief.outcome ?? 'automate the workflow described in the brief',
+          trigger: brief.trigger ?? 'form_submission',
+          integrations: brief.integrations ?? [],
+          auth: brief.auth ?? 'magic_link',
+          persistence: brief.persistence ?? 'mongodb',
+          successCriteria: brief.successCriteria ?? [],
+          voiceTone: brief.voiceTone ?? null,
+          replyStyle: brief.replyStyle ?? 'professional',
+          complianceNotes: brief.complianceNotes ?? null,
+        },
+        filePaths,
+        newDependencies: depsList,
+      });
+    } catch (err) {
+      logger.warn({ err, operationId: op.id }, 'compose readme failed');
+      return reply.code(502).send({ error: 'readme_generation_failed', detail: String(err).slice(0, 240) });
+    }
+
+    const generatedAt = new Date().toISOString();
+    if (bundleVersion != null) {
+      await db.collection('operation_readmes').updateOne(
+        { operationId: op.id, bundleVersion },
+        {
+          $set: {
+            operationId: op.id,
+            bundleVersion,
+            ownerId: session.userId,
+            readme,
+            generatedAt,
+          },
+        },
+        { upsert: true },
+      );
+    }
+
+    return reply.send({
+      operationId: op.id,
+      bundleVersion,
+      generatedAt,
+      cached: false,
+      readme,
+      markdown: renderReadmeAsMarkdown(readme),
     });
   });
 

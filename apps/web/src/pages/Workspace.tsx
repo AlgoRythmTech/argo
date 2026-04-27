@@ -22,6 +22,7 @@ import { PreviewPane } from '../components/PreviewPane.js';
 import { ScopingPanel } from '../components/ScopingPanel.js';
 import { BuildStream } from '../components/BuildStream.js';
 import { SpendBadge } from '../components/SpendBadge.js';
+import { OperationReadmeButton } from '../components/OperationReadmeButton.js';
 import { cn } from '../lib/utils.js';
 
 type BuilderState =
@@ -265,6 +266,7 @@ export function Workspace() {
               </div>
             </div>
             {activeOp && <SpendBadge operationId={activeOp.id} />}
+            {activeOp && <OperationReadmeButton operationId={activeOp.id} />}
           </div>
           <div className="flex items-center gap-2">
             {activeOp?.publicUrl && (
