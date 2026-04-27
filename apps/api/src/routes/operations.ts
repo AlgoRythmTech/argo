@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
-import { composeOperationReadme, renderReadmeAsMarkdown, type OperationReadme } from '@argo/agent';
+import {
+  composeOperationReadme,
+  fallbackNameFromSentence,
+  proposeOperationName,
+  renderReadmeAsMarkdown,
+  type OperationReadme,
+} from '@argo/agent';
 import { getPrisma } from '../db/prisma.js';
 import { getMongo } from '../db/mongo.js';
 import { requireSession } from '../plugins/auth-plugin.js';
@@ -48,12 +54,30 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
     const parsed = CreateOperationBody.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
 
-    const slug = `${slugify(parsed.data.name)}-${nanoid(6).toLowerCase()}`;
+    // Smart auto-naming: when the operator submits a free-text sentence
+    // as the operation name (looks like a sentence — has spaces, > 20 chars,
+    // contains a verb-ish ending), ask GPT-5.5 for a clean 2-4 word
+    // Title Case name. Fall back to a deterministic stop-word strip if
+    // the LLM is unreachable. Operator's literal input wins for short
+    // explicitly-named operations (<= 20 chars).
+    const rawName = parsed.data.name.trim();
+    let finalName = rawName;
+    if (looksLikeSentence(rawName)) {
+      try {
+        const proposed = await proposeOperationName({ sentence: rawName });
+        finalName = proposed.name;
+      } catch (err) {
+        logger.info({ err: String(err).slice(0, 200) }, 'auto-name LLM failed, using fallback');
+        finalName = fallbackNameFromSentence(rawName);
+      }
+    }
+
+    const slug = `${slugify(finalName)}-${nanoid(6).toLowerCase()}`;
     const op = await getPrisma().operation.create({
       data: {
         ownerId: session.userId,
         slug,
-        name: parsed.data.name,
+        name: finalName,
         timezone: parsed.data.timezone,
         status: 'draft',
       },
@@ -710,4 +734,19 @@ function slugify(s: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 40)
     || 'op';
+}
+
+/**
+ * "Candidate Intake" -> false (already a tidy short name; respect the operator).
+ * "I want a form that..." -> true (sentence-shaped; should be auto-named).
+ * Heuristics: > 20 chars OR contains 4+ spaces OR ends with a sentence
+ * punctuation. Conservative — false negatives just mean we keep the
+ * original input, which is fine.
+ */
+function looksLikeSentence(s: string): boolean {
+  if (s.length > 20) return true;
+  const spaceCount = (s.match(/\s/g) ?? []).length;
+  if (spaceCount >= 4) return true;
+  if (/[.!?]\s*$/.test(s)) return true;
+  return false;
 }
