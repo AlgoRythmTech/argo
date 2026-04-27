@@ -24,11 +24,12 @@
     "lint": "echo 'lint: nothing to do'"
   },
   "dependencies": {
-    "@argo/shared-types": "workspace:*",
     "@argo/security": "workspace:*",
+    "@argo/shared-types": "workspace:*",
     "nanoid": "^5.0.7",
     "pino": "^9.3.2",
     "undici": "^6.19.5",
+    "yaml": "^2.8.3",
     "zod": "^3.23.8",
     "zod-to-json-schema": "^3.23.2"
   },
