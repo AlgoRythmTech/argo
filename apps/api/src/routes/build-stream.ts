@@ -13,7 +13,7 @@
 import { z } from 'zod';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { runAutoFixLoop, type AutoFixCycleEvent } from '@argo/build-engine';
-import { pickSpecialist } from '@argo/agent';
+import { estimateCost, pickSpecialist } from '@argo/agent';
 import { getPrisma } from '../db/prisma.js';
 import { getMongo } from '../db/mongo.js';
 import { requireSession } from '../plugins/auth-plugin.js';
@@ -92,6 +92,34 @@ export async function registerBuildStreamRoutes(app: FastifyInstance) {
       ac.abort();
     });
 
+    // Live cost meter: throttle token_tick to one event per second so
+    // the SSE channel doesn't flood. The estimateCost split is rough
+    // (we don't get a clean prompt/completion breakdown mid-stream)
+    // but it gives the operator a moving number; the post-deploy
+    // ledger writes the authoritative cost via persist().
+    const buildModel = process.env.OPENAI_MODEL_PRIMARY ?? 'gpt-5.5';
+    let lastTokenTickAt = 0;
+    let lastTokens = 0;
+    const maybeEmitTokenTick = (totalTokens: number | null) => {
+      if (totalTokens == null || totalTokens <= lastTokens) return;
+      const now = Date.now();
+      if (now - lastTokenTickAt < 1000) return;
+      lastTokenTickAt = now;
+      lastTokens = totalTokens;
+      // Rough split — output dominates a streaming completion. The
+      // billing ledger (persist) gets the real numbers afterward.
+      const promptTokens = Math.round(totalTokens * 0.35);
+      const completionTokens = totalTokens - promptTokens;
+      const breakdown = estimateCost({ model: buildModel, promptTokens, completionTokens });
+      writeEvent('token_tick', {
+        totalTokens,
+        promptTokens,
+        completionTokens,
+        estimatedUsd: Number(breakdown.totalUsd.toFixed(4)),
+        model: buildModel,
+      });
+    };
+
     try {
       writeEvent('start', {
         operationId: op.id,
@@ -134,7 +162,10 @@ export async function registerBuildStreamRoutes(app: FastifyInstance) {
           ownerId: session.userId,
         },
         signal: ac.signal,
-        onChunk: (delta) => writeEvent('chunk', { delta }),
+        onChunk: (delta, _full, totalTokens) => {
+          writeEvent('chunk', { delta });
+          maybeEmitTokenTick(totalTokens);
+        },
         onCycle: (evt: AutoFixCycleEvent) => {
           if (evt.kind === 'actions_parsed') {
             for (const action of evt.actions) {

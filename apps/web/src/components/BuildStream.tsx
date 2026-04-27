@@ -12,13 +12,16 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   CheckCircle2,
   CircleAlert,
+  CircleDollarSign,
   CircleDotDashed,
   CircleX,
   FileCode2,
+  Hash,
   Loader2,
   Package,
   ShieldCheck,
   Sparkles,
+  Wrench,
 } from 'lucide-react';
 import { cn } from '../lib/utils.js';
 
@@ -76,8 +79,19 @@ export function BuildStream({ operationId, prompt, onComplete }: BuildStreamProp
   const [done, setDone] = useState<{ success: boolean; cycles: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(true);
+  const [tokens, setTokens] = useState<{ total: number; usd: number } | null>(null);
+  const [startedAt] = useState<number>(() => Date.now());
+  const [now, setNow] = useState<number>(() => Date.now());
   const filesRef = useRef(files);
   filesRef.current = files;
+
+  // Tick a clock once a second so the elapsed timer in the header
+  // moves without re-rendering on every chunk.
+  useEffect(() => {
+    if (!streaming) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [streaming]);
 
   useEffect(() => {
     let cancelled = false;
@@ -209,6 +223,9 @@ export function BuildStream({ operationId, prompt, onComplete }: BuildStreamProp
             : c,
         ),
       );
+    } else if (event === 'token_tick') {
+      const p = payload as { totalTokens: number; estimatedUsd: number };
+      setTokens({ total: p.totalTokens, usd: p.estimatedUsd });
     } else if (event === 'done') {
       const p = payload as { success: boolean };
       setDone({ success: p.success, cycles: cycles.length || activeCycle || 1 });
@@ -224,16 +241,31 @@ export function BuildStream({ operationId, prompt, onComplete }: BuildStreamProp
   return (
     <div className="flex flex-col h-full bg-argo-surface/30 overflow-hidden">
       <header className="flex items-center justify-between border-b border-argo-border px-4 h-12 flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-argo-accent" />
+        <div className="flex items-center gap-2 min-w-0">
+          <Sparkles className="h-4 w-4 text-argo-accent flex-shrink-0" />
           <span className="text-sm text-argo-text">
             {streaming ? 'Building' : done?.success ? 'Build complete' : 'Build failed'}
           </span>
           {specialist && (
-            <span className="text-xs text-argo-textSecondary font-mono">· {specialist.replace(/_/g, ' ')}</span>
+            <span className="text-xs text-argo-textSecondary font-mono truncate">· {specialist.replace(/_/g, ' ')}</span>
           )}
         </div>
-        {streaming && <Loader2 className="h-4 w-4 animate-spin text-argo-textSecondary" />}
+        <div className="flex items-center gap-3 text-xs text-argo-textSecondary font-mono flex-shrink-0">
+          {tokens && (
+            <>
+              <span title="Tokens generated this build" className="inline-flex items-center gap-1">
+                <Hash className="h-3 w-3" />
+                {formatTokens(tokens.total)}
+              </span>
+              <span title="Estimated LLM cost so far (final cost is in Replay)" className="inline-flex items-center gap-1 text-argo-accent">
+                <CircleDollarSign className="h-3 w-3" />
+                {formatUsd(tokens.usd)}
+              </span>
+            </>
+          )}
+          <span title="Elapsed time">{formatElapsed(now - startedAt)}</span>
+          {streaming && <Loader2 className="h-4 w-4 animate-spin text-argo-textSecondary" />}
+        </div>
       </header>
 
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
@@ -243,6 +275,11 @@ export function BuildStream({ operationId, prompt, onComplete }: BuildStreamProp
             <CyclePill key={c.cycle} cycle={c} active={activeCycle === c.cycle && streaming} />
           ))}
         </div>
+
+        {/* Auto-fix narrative — appears when cycle 2+ kicks in, explaining
+            WHY a re-prompt is happening so the operator sees Argo's
+            quality loop in action instead of "another spinner". */}
+        <AutoFixNarrative cycles={cycles} activeCycle={activeCycle} streaming={streaming} />
 
         {/* Files appearing */}
         {files.size > 0 && (
@@ -394,8 +431,89 @@ function CyclePill({ cycle, active }: { cycle: CycleState; active: boolean }) {
   );
 }
 
+function AutoFixNarrative({
+  cycles,
+  activeCycle,
+  streaming,
+}: {
+  cycles: CycleState[];
+  activeCycle: number | null;
+  streaming: boolean;
+}) {
+  // Only show when an auto-fix iteration is in progress AND we have a
+  // failed prior cycle to explain. First cycle gets no banner — the
+  // operator already knows the build just started.
+  if (activeCycle == null || activeCycle < 2 || !streaming) return null;
+  const prior = cycles.find((c) => c.cycle === activeCycle - 1);
+  if (!prior || prior.passed !== false || prior.errorCount === 0) return null;
+
+  // Top-3 failed checks summarised by check id with a count.
+  const checkCounts = new Map<string, number>();
+  for (const issue of prior.issues) {
+    if (issue.severity !== 'error') continue;
+    checkCounts.set(issue.check, (checkCounts.get(issue.check) ?? 0) + 1);
+  }
+  const topChecks = Array.from(checkCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      className="rounded-lg border border-argo-accent/30 bg-argo-accent/5 px-3 py-2.5"
+    >
+      <div className="flex items-start gap-2">
+        <Wrench className="h-3.5 w-3.5 text-argo-accent mt-0.5 flex-shrink-0" />
+        <div className="text-sm text-argo-text argo-body min-w-0">
+          <span className="text-argo-accent font-medium">Cycle {activeCycle} · auto-fixing.</span>{' '}
+          Cycle {prior.cycle} failed the quality gate ({prior.errorCount} error
+          {prior.errorCount === 1 ? '' : 's'}). Re-prompting GPT-5.5 with the structured error
+          report so it patches:
+          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+            {topChecks.map(([check, count]) => (
+              <span
+                key={check}
+                className="text-[10px] uppercase tracking-widest font-mono bg-argo-amber/10 text-argo-amber border border-argo-amber/30 rounded px-1.5 py-0.5"
+              >
+                {check.replace(/_/g, ' ')}
+                {count > 1 && <span className="ml-1 text-argo-textSecondary">×{count}</span>}
+              </span>
+            ))}
+            {checkCounts.size > 3 && (
+              <span className="text-[10px] text-argo-textSecondary font-mono">
+                +{checkCounts.size - 3} more
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 function prettyBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} kB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return `${n} tok`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k tok`;
+  return `${(n / 1_000_000).toFixed(2)}M tok`;
+}
+
+function formatUsd(n: number): string {
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  if (n < 1) return `$${n.toFixed(3)}`;
+  if (n < 100) return `$${n.toFixed(2)}`;
+  return `$${Math.round(n)}`;
+}
+
+function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
 }

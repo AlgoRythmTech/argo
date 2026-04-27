@@ -13,3 +13,4 @@ export * from './digest/index.js';
 export * from './scoping/index.js';
 export * from './reference/index.js';
 export * from './supermemory/index.js';
+export * from './cost/pricing.js';

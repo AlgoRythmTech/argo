@@ -38,8 +38,13 @@ export interface AutoFixArgs {
   maxCycles?: number;
   /** Per-cycle progress callback. */
   onCycle?: (event: AutoFixCycleEvent) => void;
-  /** Per-streamed-chunk delta callback (for SSE forwarding). */
-  onChunk?: (delta: string, fullText: string) => void;
+  /**
+   * Per-streamed-chunk delta callback (for SSE forwarding).
+   * `totalTokens` is the cumulative token count when the provider has
+   * reported one (some streams emit it only on the final chunk; others
+   * emit it inline). Use it to drive a live cost meter.
+   */
+  onChunk?: (delta: string, fullText: string, totalTokens: number | null) => void;
   /** AbortSignal so the API route can cut the loop. */
   signal?: AbortSignal;
 }
@@ -110,7 +115,7 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
           : {}),
         ...(args.signal ? { signal: args.signal } : {}),
       })) {
-        if (chunk.delta && args.onChunk) args.onChunk(chunk.delta, chunk.fullText);
+        if (chunk.delta && args.onChunk) args.onChunk(chunk.delta, chunk.fullText, chunk.totalTokens);
         fullText = chunk.fullText;
         if (chunk.aborted) break;
         if (chunk.done) break;
