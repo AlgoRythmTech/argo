@@ -33,6 +33,9 @@ const Body = z.object({
       'form_workflow',
       'multi_tenant_saas',
       'agent_runtime',
+      'data_pipeline',
+      'search_service',
+      'internal_tool',
       'generic',
     ])
     .optional(),

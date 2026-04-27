@@ -118,6 +118,142 @@ export const x = 1;
     expect(report.issues.some((i) => i.check === 'argo_generated_header_present')).toBe(true);
   });
 
+  it('flags interpolated SQL strings (no_sql_string_concatenation)', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents: `// argo:scaffolding
+require('node:http').createServer().listen(3000,'0.0.0.0');
+process.on('SIGTERM',()=>{});`,
+          argoGenerated: false,
+        },
+        {
+          path: 'routes/health.js',
+          contents: `// argo:scaffolding\nexports.h=()=>0;`,
+          argoGenerated: false,
+        },
+        {
+          path: 'routes/items.js',
+          contents:
+            "/**\n * argo:generated\n */\nconst q = `SELECT * FROM items WHERE id = ${req.params.id}`;",
+          argoGenerated: true,
+        },
+      ]),
+    );
+    expect(r.issues.some((i) => i.check === 'no_sql_string_concatenation')).toBe(true);
+  });
+
+  it('flags MD5 + Math.random for tokens (no_weak_crypto)', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents: `// argo:scaffolding
+require('node:http').createServer().listen(3000,'0.0.0.0');
+process.on('SIGTERM',()=>{});`,
+          argoGenerated: false,
+        },
+        {
+          path: 'routes/health.js',
+          contents: `// argo:scaffolding\nexports.h=()=>0;`,
+          argoGenerated: false,
+        },
+        {
+          path: 'auth/tokens.js',
+          contents:
+            "/**\n * argo:generated\n */\nconst h = createHash('md5').update(x).digest();\nconst token = Math.random().toString(36);",
+          argoGenerated: true,
+        },
+      ]),
+    );
+    const ids = r.issues.filter((i) => i.check === 'no_weak_crypto');
+    expect(ids.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('flags path traversal from req.params (no_path_traversal_from_user_input)', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents: `// argo:scaffolding
+require('node:http').createServer().listen(3000,'0.0.0.0');
+process.on('SIGTERM',()=>{});`,
+          argoGenerated: false,
+        },
+        {
+          path: 'routes/health.js',
+          contents: `// argo:scaffolding\nexports.h=()=>0;`,
+          argoGenerated: false,
+        },
+        {
+          path: 'routes/files.js',
+          contents:
+            "/**\n * argo:generated\n */\nconst p = path.join('/data', req.params.filename);",
+          argoGenerated: true,
+        },
+      ]),
+    );
+    expect(r.issues.some((i) => i.check === 'no_path_traversal_from_user_input')).toBe(true);
+  });
+
+  it('flags secrets interpolated into errors (no_secrets_in_error_messages)', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents: `// argo:scaffolding
+require('node:http').createServer().listen(3000,'0.0.0.0');
+process.on('SIGTERM',()=>{});`,
+          argoGenerated: false,
+        },
+        {
+          path: 'routes/health.js',
+          contents: `// argo:scaffolding\nexports.h=()=>0;`,
+          argoGenerated: false,
+        },
+        {
+          path: 'routes/debug.js',
+          contents:
+            '/**\n * argo:generated\n */\nthrow new Error(`could not connect with key ${process.env.OPENAI_API_KEY}`);',
+          argoGenerated: true,
+        },
+      ]),
+    );
+    expect(r.issues.some((i) => i.check === 'no_secrets_in_error_messages')).toBe(true);
+  });
+
+  it('flags HTTP outbound URLs (no_http_in_outbound_urls)', () => {
+    const r = runQualityGate(
+      bundleWith([
+        { path: 'package.json', contents: '{"name":"x","type":"module"}', argoGenerated: false },
+        {
+          path: 'server.js',
+          contents: `// argo:scaffolding
+require('node:http').createServer().listen(3000,'0.0.0.0');
+process.on('SIGTERM',()=>{});`,
+          argoGenerated: false,
+        },
+        {
+          path: 'routes/health.js',
+          contents: `// argo:scaffolding\nexports.h=()=>0;`,
+          argoGenerated: false,
+        },
+        {
+          path: 'lib/http.js',
+          contents:
+            "/**\n * argo:generated\n */\nawait request('http://api.example.com/v1/things');",
+          argoGenerated: true,
+        },
+      ]),
+    );
+    expect(r.issues.some((i) => i.check === 'no_http_in_outbound_urls')).toBe(true);
+  });
+
   it('produces an autoFixPrompt that lists every error', () => {
     const r = runQualityGate(
       bundleWith([

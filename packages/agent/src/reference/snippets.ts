@@ -778,6 +778,370 @@ export const tools = {
   },
 
   {
+    id: 'circuit-breaker',
+    title: 'Circuit breaker for outbound calls (closed → open → half-open)',
+    tags: ['every-build', 'resilience'],
+    purpose:
+      'Outbound calls to a flaky upstream should fail fast instead of timing out 1000 requests in a row. Standard three-state breaker: closed = normal; open = reject for cooldown; half-open = let one trial through.',
+    hintedPath: 'lib/circuit-breaker.js',
+    language: 'js',
+    body: `export function makeCircuitBreaker({ failureThreshold = 5, cooldownMs = 30_000 } = {}) {
+  let state = 'closed';
+  let failures = 0;
+  let openedAt = 0;
+
+  async function execute(fn) {
+    if (state === 'open') {
+      if (Date.now() - openedAt < cooldownMs) {
+        throw Object.assign(new Error('circuit_open'), { transient: false, code: 'CIRCUIT_OPEN' });
+      }
+      state = 'half-open';
+    }
+    try {
+      const result = await fn();
+      if (state === 'half-open') { state = 'closed'; failures = 0; }
+      return result;
+    } catch (err) {
+      failures++;
+      if (state === 'half-open' || failures >= failureThreshold) {
+        state = 'open';
+        openedAt = Date.now();
+      }
+      throw err;
+    }
+  }
+  return { execute, get state() { return state; } };
+}
+`,
+  },
+
+  {
+    id: 'otel-tracing',
+    title: 'OpenTelemetry tracing — one helper, every route auto-traced',
+    tags: ['every-build', 'observability.advanced'],
+    purpose:
+      'Spans for every Fastify route, every Mongo query, every outbound HTTP call. Exports OTLP if OTEL_EXPORTER_OTLP_ENDPOINT is set; no-ops otherwise. Argo never blocks on tracing.',
+    hintedPath: 'observability/tracing.js',
+    language: 'js',
+    body: `import { trace, context, SpanStatusCode } from '@opentelemetry/api';
+
+const tracer = trace.getTracer('argo-runtime');
+
+export function withSpan(name, fn, attrs = {}) {
+  return tracer.startActiveSpan(name, async (span) => {
+    try {
+      span.setAttributes(attrs);
+      const result = await fn(span);
+      span.setStatus({ code: SpanStatusCode.OK });
+      return result;
+    } catch (err) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+      span.recordException(err);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
+
+// Auto-instrument every route via a Fastify plugin:
+export function tracingPlugin(app) {
+  app.addHook('onRequest', async (req) => {
+    const span = tracer.startSpan(\`HTTP \${req.method} \${req.routerPath ?? req.url}\`, {
+      attributes: { 'http.method': req.method, 'http.url': req.url },
+    });
+    req.__span = span;
+    req.__ctx = trace.setSpan(context.active(), span);
+  });
+  app.addHook('onResponse', async (req, reply) => {
+    if (!req.__span) return;
+    req.__span.setAttribute('http.status_code', reply.statusCode);
+    if (reply.statusCode >= 500) req.__span.setStatus({ code: SpanStatusCode.ERROR });
+    req.__span.end();
+  });
+}
+`,
+  },
+
+  {
+    id: 'prisma-migrations',
+    title: 'Prisma migrations — forward-only, applied on boot',
+    tags: ['multi_tenant_saas', 'persistence.postgres'],
+    purpose:
+      'Schema evolution without manual SQL. Migrations are forward-only and idempotent. Boot script runs `prisma migrate deploy` BEFORE the app starts accepting traffic.',
+    hintedPath: 'prisma/schema.prisma',
+    language: 'js',
+    body: `// prisma/schema.prisma
+generator client { provider = "prisma-client-js" }
+datasource db   { provider = "postgresql"; url = env("DATABASE_URL") }
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  users     User[]
+  audits    Audit[]
+}
+
+model User {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email     String   @unique
+  role      String   @default("member")  // 'owner' | 'admin' | 'member'
+  createdAt DateTime @default(now())
+  @@index([tenantId])
+}
+
+model Audit {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  actorId     String
+  action      String
+  targetType  String
+  targetId    String
+  before      Json?
+  after       Json?
+  reason      String?
+  occurredAt  DateTime @default(now())
+  @@index([tenantId, occurredAt])
+}
+
+// Boot wrapper (boot.js):
+//   const { execSync } = require('node:child_process');
+//   execSync('npx prisma migrate deploy', { stdio: 'inherit' });
+//   require('./server.js');
+`,
+  },
+
+  {
+    id: 'graphql-mercurius',
+    title: 'GraphQL with Mercurius (Fastify) — typed schema + DataLoader',
+    tags: ['rest_api.optional', 'graphql'],
+    purpose:
+      'When the operator says "I want a GraphQL API" — Mercurius is the Fastify-native choice. Pair every relation with a DataLoader so N+1 queries don\'t leak in.',
+    hintedPath: 'graphql/schema.js',
+    language: 'js',
+    body: `import mercurius from 'mercurius';
+import DataLoader from 'dataloader';
+
+const schema = \`
+  type Tenant { id: ID!, name: String!, users: [User!]! }
+  type User   { id: ID!, email: String!, role: String!, tenant: Tenant! }
+  type Query {
+    me: User
+    tenants: [Tenant!]!
+  }
+\`;
+
+export function registerGraphQL(app, { mongo }) {
+  const resolvers = {
+    Query: {
+      me: async (_root, _args, ctx) => mongo.db.collection('users').findOne({ _id: ctx.userId }),
+      tenants: async (_root, _args, ctx) =>
+        mongo.db.collection('tenants').find({ users: ctx.userId }).toArray(),
+    },
+    User: {
+      tenant: async (user, _args, ctx) => ctx.loaders.tenant.load(user.tenantId),
+    },
+  };
+
+  app.register(mercurius, {
+    schema,
+    resolvers,
+    graphiql: process.env.NODE_ENV !== 'production',
+    context: (req) => ({
+      userId: req.session?.userId,
+      loaders: {
+        tenant: new DataLoader(async (ids) => {
+          const docs = await mongo.db.collection('tenants').find({ _id: { $in: ids } }).toArray();
+          const byId = new Map(docs.map((d) => [String(d._id), d]));
+          return ids.map((id) => byId.get(id));
+        }),
+      },
+    }),
+  });
+}
+`,
+  },
+
+  {
+    id: 'pgvector-search',
+    title: 'pgvector hybrid search — lexical + vector with RRF fusion',
+    tags: ['search_service', 'persistence.postgres'],
+    purpose:
+      'Postgres handles both halves: tsvector + GIN for lexical, pgvector + IVFFlat for semantic. Reciprocal-rank-fuse the two result sets server-side. No external search infra needed.',
+    hintedPath: 'search/hybrid.sql',
+    language: 'js',
+    body: `// schema (run as a migration once):
+//   CREATE EXTENSION IF NOT EXISTS vector;
+//   CREATE TABLE docs (
+//     id          TEXT PRIMARY KEY,
+//     body        TEXT NOT NULL,
+//     body_tsv    tsvector GENERATED ALWAYS AS (to_tsvector('english', body)) STORED,
+//     embedding   vector(1536) NOT NULL
+//   );
+//   CREATE INDEX docs_tsv_idx ON docs USING GIN (body_tsv);
+//   CREATE INDEX docs_emb_idx ON docs USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+// query.js
+import { embed } from './embed.js';
+import { rrf } from './rrf.js';
+
+export async function hybridSearch(pool, q, limit = 20) {
+  const embedding = await embed(q);
+  const lexical = await pool.query(
+    \`SELECT id, ts_rank(body_tsv, websearch_to_tsquery('english', $1)) AS score
+     FROM docs WHERE body_tsv @@ websearch_to_tsquery('english', $1)
+     ORDER BY score DESC LIMIT $2\`,
+    [q, limit * 2],
+  );
+  const vector = await pool.query(
+    \`SELECT id, 1 - (embedding <=> $1::vector) AS score
+     FROM docs ORDER BY embedding <=> $1::vector LIMIT $2\`,
+    [\`[\${embedding.join(',')}]\`, limit * 2],
+  );
+  return rrf([lexical.rows, vector.rows], { k: 60, limit });
+}
+`,
+  },
+
+  {
+    id: 'etl-backfill',
+    title: 'Streaming ETL with watermarks + backfill + DLQ',
+    tags: ['data_pipeline'],
+    purpose:
+      'Single canonical pipeline shape: pull → transform → upsert. Watermark every 100 records. Failed records to DLQ with full payload. Backfill is a separate command that replays a timestamp range.',
+    hintedPath: 'pipeline/run.js',
+    language: 'js',
+    body: `import { z } from 'zod';
+
+const Record = z.object({
+  id: z.string(),
+  occurredAt: z.string().datetime(),
+  payload: z.record(z.unknown()),
+});
+
+export async function runIncremental({ source, sink, watermark, dlq }) {
+  const since = await watermark.read();
+  let lastSeen = since;
+  let processed = 0;
+  const batch = [];
+
+  for await (const raw of source.iterate({ since })) {
+    const parsed = Record.safeParse(raw);
+    if (!parsed.success) {
+      await dlq.append({ raw, error: parsed.error.message });
+      continue;
+    }
+    batch.push(parsed.data);
+    lastSeen = parsed.data.occurredAt;
+    if (batch.length >= 100) {
+      await sink.upsert(batch);     // bulkWrite under the hood
+      await watermark.write(lastSeen);
+      processed += batch.length;
+      batch.length = 0;
+    }
+  }
+  if (batch.length > 0) {
+    await sink.upsert(batch);
+    await watermark.write(lastSeen);
+    processed += batch.length;
+  }
+  return { processed, lastWatermark: lastSeen };
+}
+
+// Backfill is the same loop, scoped to a window. Operators trigger it via /admin/backfill.
+export async function runBackfill({ source, sink, dlq, start, end }) {
+  return runIncremental({
+    source: { iterate: ({ since }) => source.iterate({ since: start, until: end }) },
+    sink, dlq,
+    watermark: { read: () => start, write: () => Promise.resolve() }, // backfill doesn't move the live watermark
+  });
+}
+`,
+  },
+
+  {
+    id: 'saml-sso',
+    title: 'SAML SSO with @node-saml/passport-saml',
+    tags: ['auth.saml', 'multi_tenant_saas'],
+    purpose:
+      'When the enterprise customer asks for SAML, this is the canonical wiring. Per-tenant SAML config in DB; SP-initiated flow; signs assertions; rejects unsigned responses.',
+    hintedPath: 'auth/saml.js',
+    language: 'js',
+    body: `import { Strategy as SamlStrategy } from '@node-saml/passport-saml';
+import passport from 'passport';
+
+export function registerSaml(app, { tenantConfig }) {
+  passport.use(new SamlStrategy({
+    callbackUrl: process.env.PUBLIC_URL + '/auth/saml/callback',
+    entryPoint: tenantConfig.entryPoint,
+    issuer: tenantConfig.issuer,
+    cert: tenantConfig.idpCert,        // PEM-encoded IdP signing cert
+    wantAssertionsSigned: true,
+    wantAuthnResponseSigned: true,
+    signatureAlgorithm: 'sha256',
+    digestAlgorithm: 'sha256',
+    disableRequestedAuthnContext: false,
+  }, (profile, done) => {
+    if (!profile.nameID || !profile.email) return done(new Error('saml_missing_attrs'));
+    return done(null, { email: profile.email, samlNameId: profile.nameID });
+  }));
+
+  app.get('/auth/saml/start',    passport.authenticate('saml', { session: false }));
+  app.post('/auth/saml/callback', passport.authenticate('saml', { session: false }), async (req, reply) => {
+    // Provision-or-find the user in the tenant; mint your standard session.
+    const session = await app.session.create({ email: req.user.email, samlNameId: req.user.samlNameId });
+    reply.setCookie('session', session.token, { httpOnly: true, secure: true, sameSite: 'lax' }).redirect('/');
+  });
+}
+`,
+  },
+
+  {
+    id: 'blue-green-deploy',
+    title: 'Blue-green deploy via the IExecutionProvider swap',
+    tags: ['every-build.deploy'],
+    purpose:
+      'Argo\'s control plane already does staging-swap. THIS snippet shows what the runtime\'s server.js must do so the swap is graceful: drain in-flight requests, finish the current job, refuse new connections, exit cleanly within 30s of SIGTERM.',
+    hintedPath: 'lifecycle/shutdown.js',
+    language: 'js',
+    body: `import { setTimeout as sleep } from 'node:timers/promises';
+
+export function attachGracefulShutdown(app, { jobs }) {
+  let shuttingDown = false;
+  const inflight = new Set();
+
+  app.addHook('onRequest', async (req) => {
+    if (shuttingDown) {
+      // 503 + Retry-After tells load balancers + cron retriers to back off.
+      throw Object.assign(new Error('shutting_down'), { statusCode: 503 });
+    }
+    inflight.add(req.id);
+  });
+  app.addHook('onResponse', async (req) => { inflight.delete(req.id); });
+
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.once(sig, async () => {
+      shuttingDown = true;
+      app.log.info({ sig, inflight: inflight.size }, 'shutdown: refusing new requests');
+      await jobs?.pause?.();           // BullMQ workers stop accepting new jobs
+      // Drain up to 25s; the last 5s is the OS hard-kill margin.
+      const deadline = Date.now() + 25_000;
+      while (inflight.size > 0 && Date.now() < deadline) await sleep(200);
+      app.log.info({ remaining: inflight.size }, 'shutdown: closing app');
+      await app.close();
+      await jobs?.close?.();
+      process.exit(0);
+    });
+  }
+}
+`,
+  },
+
+  {
     id: 'agent-bounded-memory',
     title: 'Bounded conversation memory with deterministic truncation',
     tags: ['agent_runtime'],

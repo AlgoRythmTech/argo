@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
+  Diff,
   Eye,
   FileCode2,
+  Inbox,
   Loader2,
   Monitor,
   RefreshCw,
@@ -10,13 +12,17 @@ import {
   Repeat,
   ShieldCheck,
   Smartphone,
+  Sparkles,
   Tablet,
 } from 'lucide-react';
 import { operations, type GeneratedBundle, type Operation, type PreviewAction } from '../api/client.js';
 import { CodeViewer } from './CodeViewer.js';
+import { BundleDiffViewer } from './BundleDiffViewer.js';
+import { ReplayPanel } from './ReplayPanel.js';
+import { NotificationsInbox } from './NotificationsInbox.js';
 import { cn } from '../lib/utils.js';
 
-export type PreviewTab = 'preview' | 'code';
+export type PreviewTab = 'preview' | 'code' | 'diff' | 'replay' | 'inbox';
 
 interface PreviewPaneProps {
   operation: Operation | null;
@@ -110,6 +116,15 @@ export function PreviewPane({ operation }: PreviewPaneProps) {
           <TabButton active={tab === 'code'} onClick={() => setTab('code')} icon={<FileCode2 className="h-3.5 w-3.5" />}>
             Code
           </TabButton>
+          <TabButton active={tab === 'diff'} onClick={() => setTab('diff')} icon={<Diff className="h-3.5 w-3.5" />}>
+            Diff
+          </TabButton>
+          <TabButton active={tab === 'replay'} onClick={() => setTab('replay')} icon={<Sparkles className="h-3.5 w-3.5" />}>
+            Replay
+          </TabButton>
+          <TabButton active={tab === 'inbox'} onClick={() => setTab('inbox')} icon={<Inbox className="h-3.5 w-3.5" />}>
+            Inbox
+          </TabButton>
         </div>
         {tab === 'preview' && (
           <div className="flex items-center gap-3">
@@ -169,6 +184,39 @@ export function PreviewPane({ operation }: PreviewPaneProps) {
                   </div>
                 </div>
               )}
+            </motion.div>
+          ) : tab === 'diff' ? (
+            <motion.div
+              key="diff"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0"
+            >
+              <BundleDiffViewer operationId={operation.id} />
+            </motion.div>
+          ) : tab === 'replay' ? (
+            <motion.div
+              key="replay"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0"
+            >
+              <ReplayPanel operationId={operation.id} />
+            </motion.div>
+          ) : tab === 'inbox' ? (
+            <motion.div
+              key="inbox"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0"
+            >
+              <NotificationsInbox />
             </motion.div>
           ) : (
             <motion.div

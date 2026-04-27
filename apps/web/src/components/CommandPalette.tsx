@@ -8,12 +8,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
+  Archive,
   Copy,
   ExternalLink,
   LogOut,
   Plus,
   Repeat,
+  RotateCcw,
   Search,
+  Trash2,
   Wrench,
 } from 'lucide-react';
 import { useArgo } from '../state/store.js';
@@ -134,6 +137,58 @@ export function CommandPalette() {
               await operations.deploy(op.id);
             } catch {
               /* Workspace surfaces the error via SSE */
+            }
+          },
+        });
+      }
+      if (op.status !== 'archived') {
+        cmds.push({
+          id: `op-${op.id}-archive`,
+          label: `Archive — ${op.name}`,
+          hint: 'Tears down sandbox; restorable for 30 days',
+          group: 'operation',
+          icon: Archive,
+          run: async () => {
+            setOpen(false);
+            try {
+              await operations.archive(op.id);
+            } catch {
+              /* Workspace surfaces the error */
+            }
+          },
+        });
+      } else {
+        cmds.push({
+          id: `op-${op.id}-restore`,
+          label: `Restore — ${op.name}`,
+          hint: 'Move back to draft; redeploy to bring online',
+          group: 'operation',
+          icon: RotateCcw,
+          run: async () => {
+            setOpen(false);
+            try {
+              await operations.restore(op.id);
+            } catch {
+              /* surfaces in workspace */
+            }
+          },
+        });
+        cmds.push({
+          id: `op-${op.id}-delete`,
+          label: `Delete forever — ${op.name}`,
+          hint: 'Permanently removes data (audit log preserved)',
+          group: 'operation',
+          icon: Trash2,
+          run: async () => {
+            setOpen(false);
+            const confirm = window.prompt(
+              `Type the operation name to permanently delete:\n\n  ${op.name}`,
+            );
+            if (confirm !== op.name) return;
+            try {
+              await operations.delete(op.id);
+            } catch {
+              /* surfaces in workspace */
             }
           },
         });

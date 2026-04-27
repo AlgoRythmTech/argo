@@ -26,7 +26,18 @@ export type QualityCheckId =
   | 'binds_to_0_0_0_0'
   | 'no_synchronous_fs'
   | 'package_json_valid'
-  | 'no_deprecated_apis';
+  | 'no_deprecated_apis'
+  // ── v2 hardening (Day 4): ten more security & operational checks ──
+  | 'no_sql_string_concatenation'
+  | 'no_prototype_pollution'
+  | 'no_weak_crypto'
+  | 'no_unsafe_regex'
+  | 'no_path_traversal_from_user_input'
+  | 'no_xml_external_entities'
+  | 'public_post_routes_have_rate_limit'
+  | 'no_secrets_in_error_messages'
+  | 'no_open_cors_in_prod'
+  | 'no_http_in_outbound_urls';
 
 export interface QualityIssue {
   check: QualityCheckId;
@@ -58,11 +69,22 @@ export function runQualityGate(bundle: OperationBundle): QualityReport {
     issues.push(...checkUnhandled(file));
     issues.push(...checkLocalhost(file));
     issues.push(...checkSyncFs(file));
+    // v2 hardening
+    issues.push(...checkSqlConcatenation(file));
+    issues.push(...checkPrototypePollution(file));
+    issues.push(...checkWeakCrypto(file));
+    issues.push(...checkUnsafeRegex(file));
+    issues.push(...checkPathTraversal(file));
+    issues.push(...checkXmlEntities(file));
+    issues.push(...checkSecretsInErrors(file));
+    issues.push(...checkOpenCors(file));
+    issues.push(...checkHttpOutboundUrls(file));
   }
 
   issues.push(...checkServerBootstrap(bundle));
   issues.push(...checkPackageJson(bundle));
   issues.push(...checkRouteValidation(bundle));
+  issues.push(...checkPublicRoutesHaveRateLimit(bundle));
 
   const errorCount = issues.filter((i) => i.severity === 'error').length;
   const warnCount = issues.filter((i) => i.severity === 'warn').length;
@@ -361,6 +383,242 @@ function checkRouteValidation(bundle: OperationBundle): QualityIssue[] {
         file: r.path,
         line: null,
         message: 'POST route without Zod validation. Every public input MUST go through safeParse before persisting.',
+      });
+    }
+  }
+  return out;
+}
+
+// ── v2 hardening: ten more security & operational checks ──────────────
+
+function checkSqlConcatenation(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  // Detect template-literal SQL with interpolation OR string-concat building SQL.
+  const SQL_KEYWORD = /\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\b/i;
+  lines.forEach((line, idx) => {
+    const looksLikeSql = SQL_KEYWORD.test(line);
+    if (!looksLikeSql) return;
+    const hasInterpolation = /\$\{[^}]+\}/.test(line) || /'\s*\+\s*\w/.test(line);
+    if (hasInterpolation && !/\?\s*=|\$\d/.test(line)) {
+      out.push({
+        check: 'no_sql_string_concatenation',
+        severity: 'error',
+        file: f.path,
+        line: idx + 1,
+        message:
+          'SQL with interpolation/concatenation detected — use parameterised queries (\$1, \$2, …) or a query builder (kysely).',
+      });
+    }
+  });
+  return out;
+}
+
+function checkPrototypePollution(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  lines.forEach((line, idx) => {
+    if (
+      /\[\s*['"`](?:__proto__|constructor|prototype)['"`]\s*\]\s*=/.test(line) ||
+      /Object\.assign\s*\(\s*\{\s*\}\s*,\s*req\.(?:body|query|params)\b/.test(line)
+    ) {
+      out.push({
+        check: 'no_prototype_pollution',
+        severity: 'error',
+        file: f.path,
+        line: idx + 1,
+        message:
+          'Possible prototype-pollution sink. Validate user input with Zod and copy fields explicitly; never spread req.body into a fresh object.',
+      });
+    }
+  });
+  return out;
+}
+
+function checkWeakCrypto(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  lines.forEach((line, idx) => {
+    if (/createHash\s*\(\s*['"`](?:md5|sha1)['"`]/.test(line)) {
+      out.push({
+        check: 'no_weak_crypto',
+        severity: 'error',
+        file: f.path,
+        line: idx + 1,
+        message: 'MD5 / SHA-1 are forbidden. Use sha256 (createHash("sha256")) for hashes; bcrypt/argon2 for passwords.',
+      });
+    }
+    if (/Math\.random\s*\(\s*\)/.test(line) && /token|secret|nonce|salt|password|otp|csrf/i.test(line)) {
+      out.push({
+        check: 'no_weak_crypto',
+        severity: 'error',
+        file: f.path,
+        line: idx + 1,
+        message: 'Math.random() is not cryptographically secure. Use node:crypto randomBytes for tokens/nonces/salts.',
+      });
+    }
+  });
+  return out;
+}
+
+function checkUnsafeRegex(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  // Common ReDoS patterns: nested quantifiers, alternation with overlapping groups.
+  const REDOS = [
+    /\([^)]*[+*]\s*\)\s*[+*]/, // (a+)+, (.*)+
+    /\([^)]*[^)]\|[^)]*\)\s*[+*]/, // (a|a)+
+  ];
+  lines.forEach((line, idx) => {
+    if (!/=\s*\/.+\/[gimsuy]*\b|new\s+RegExp\s*\(/.test(line)) return;
+    for (const r of REDOS) {
+      if (r.test(line)) {
+        out.push({
+          check: 'no_unsafe_regex',
+          severity: 'warn',
+          file: f.path,
+          line: idx + 1,
+          message:
+            'Possible catastrophic-backtracking regex. Avoid nested quantifiers like (a+)+ or (.*)+; refactor to atomic groups or use a parser.',
+        });
+        break;
+      }
+    }
+  });
+  return out;
+}
+
+function checkPathTraversal(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  lines.forEach((line, idx) => {
+    // path.join / fs.readFile with raw req.params or req.query input
+    if (
+      /(?:path\.join|path\.resolve|fs\.(?:read|write|create|append).*?)\s*\([^)]*\breq\.(?:params|query|body)\b/.test(line)
+    ) {
+      out.push({
+        check: 'no_path_traversal_from_user_input',
+        severity: 'error',
+        file: f.path,
+        line: idx + 1,
+        message:
+          'Possible path traversal — never pass req.params/req.query directly to fs.* or path.join. Validate against an allow-list or use a fixed lookup table.',
+      });
+    }
+  });
+  return out;
+}
+
+function checkXmlEntities(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  lines.forEach((line, idx) => {
+    if (/new\s+(?:DOMParser|XMLParser|libxmljs)\b/.test(line) && !/no.?ent|disable.?entit|noent\s*:\s*true/i.test(line)) {
+      out.push({
+        check: 'no_xml_external_entities',
+        severity: 'warn',
+        file: f.path,
+        line: idx + 1,
+        message: 'XML parsing without explicit entity disabling. Pass { noent: false, dtd: false } or equivalent to prevent XXE.',
+      });
+    }
+  });
+  return out;
+}
+
+function checkSecretsInErrors(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  lines.forEach((line, idx) => {
+    // throw new Error(...) or reply.send({error: ...}) that interpolates an env var
+    if (
+      /(?:throw\s+new\s+Error|reply\.send|res\.status|res\.send)\s*\([^)]*\bprocess\.env\.\w+/.test(line)
+    ) {
+      out.push({
+        check: 'no_secrets_in_error_messages',
+        severity: 'error',
+        file: f.path,
+        line: idx + 1,
+        message:
+          'Don\'t interpolate process.env values into error messages or HTTP responses. They leak to logs and clients.',
+      });
+    }
+  });
+  return out;
+}
+
+function checkOpenCors(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  lines.forEach((line, idx) => {
+    if (
+      /@fastify\/cors|cors\(\s*\{/.test(line) &&
+      /origin\s*:\s*['"`]\*['"`]/.test(line)
+    ) {
+      out.push({
+        check: 'no_open_cors_in_prod',
+        severity: 'warn',
+        file: f.path,
+        line: idx + 1,
+        message:
+          'origin: "*" allows any site to call your API with cookies disabled. Restrict to the operator\'s allow-list once deployed.',
+      });
+    }
+  });
+  return out;
+}
+
+function checkHttpOutboundUrls(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  lines.forEach((line, idx) => {
+    // request("http://… or fetch("http://… (skip localhost / 127.0.0.1)
+    const m = line.match(/(?:request|fetch|undici\.request)\s*\(\s*['"`](http:\/\/[^'"`\s]+)/);
+    if (m && !/localhost|127\.0\.0\.1|host\.docker\.internal/.test(m[1] ?? '')) {
+      out.push({
+        check: 'no_http_in_outbound_urls',
+        severity: 'error',
+        file: f.path,
+        line: idx + 1,
+        message: `Outbound HTTP (not HTTPS) to ${m[1]?.slice(0, 60)}. Use https:// — third-party APIs leak credentials over plain HTTP.`,
+      });
+    }
+  });
+  return out;
+}
+
+function checkPublicRoutesHaveRateLimit(bundle: OperationBundle): QualityIssue[] {
+  const out: QualityIssue[] = [];
+  const routes = bundle.files.filter(
+    (f) => /^routes\/|^src\/routes\//.test(f.path) && /\.(ts|js)$/i.test(f.path),
+  );
+  for (const r of routes) {
+    if (
+      r.path.endsWith('health.js') ||
+      r.path.endsWith('health.ts') ||
+      r.path.endsWith('internal.js') ||
+      r.path.endsWith('internal.ts')
+    )
+      continue;
+    const hasPostOrPut = /\.(post|put|patch)\s*\(/.test(r.contents);
+    const hasRateLimit = /rateLimit\b|rate-limit|@fastify\/rate-limit|RATE\s*=/i.test(r.contents);
+    if (hasPostOrPut && !hasRateLimit) {
+      out.push({
+        check: 'public_post_routes_have_rate_limit',
+        severity: 'warn',
+        file: r.path,
+        line: null,
+        message:
+          'POST/PUT/PATCH route without an explicit rate limit. Add { config: { rateLimit: { max, timeWindow } } } so a bot can\'t exhaust the operation.',
       });
     }
   }

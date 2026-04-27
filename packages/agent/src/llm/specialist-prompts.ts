@@ -15,6 +15,9 @@ export type Specialist =
   | 'form_workflow' // ← the candidate-intake archetype, our v1 default
   | 'multi_tenant_saas' // ← the hard-mode persona (OAuth + RBAC + migrations + WS)
   | 'agent_runtime'     // ← Argo ships sub-agents inside the operation
+  | 'data_pipeline'     // ← ETL with backfill + idempotent upserts + DLQ
+  | 'search_service'    // ← lexical + vector hybrid search
+  | 'internal_tool'     // ← admin panel with RBAC + audit
   | 'generic';
 
 const SPEC_REST_API = `
@@ -344,6 +347,134 @@ budget is exhausted before MAX_ITERATIONS, return an early answer with
 - NO third-party LLM provider beyond what's already in package.json.
 `.trim();
 
+const SPEC_DATA_PIPELINE = `
+# Specialist: data pipeline (ETL with backfill + DLQ)
+
+You are writing a streaming or batch ETL — pulls from a source, normalises,
+upserts to a sink, with full operational discipline.
+
+## Hard rules
+
+- Every record has a stable, source-derived primary key (sha256 of
+  canonical fields if the source has none). Re-runs are upserts, not
+  duplicates.
+- Backfill is a first-class command, not a side effect. POST /admin/backfill
+  takes a {start, end} range and replays records in that window.
+- Per-record try/catch IS allowed here (the only specialist where it is).
+  Failures append to a 'pipeline_errors' collection with the source URL,
+  payload, error, and stack. Operators replay errors via /admin/replay-errors.
+- Watermarking: the pipeline persists the last-processed timestamp
+  every N records (default 100). On restart, resume from that watermark.
+  NEVER from the beginning. NEVER lose records.
+- Rate-limit per source domain (default 1 req/sec). Token bucket in Redis.
+- Bulk ops: when sinking to Mongo/Postgres, use bulkWrite/COPY for >50
+  records at a time. Single inserts in a hot loop are forbidden.
+- Schema evolution: the sink table has a 'schema_version' column. New
+  records always have the current version. Old versions are migrated by
+  a separate /admin/migrate-schema job, never from the hot path.
+
+## File structure
+
+- src/pipeline/source.js          (the puller)
+- src/pipeline/transform.js       (per-record normalisation + Zod validation)
+- src/pipeline/sink.js            (the upserter, bulkWrite-aware)
+- src/pipeline/watermark.js       (read/write the last-processed cursor)
+- src/pipeline/dlq.js             (append-only failure log + replay)
+- routes/admin.js                 (backfill + replay-errors + status)
+- jobs/scheduler.js               (cron trigger for incremental runs)
+
+## What you MUST emit
+
+- A /admin/status endpoint that returns: { lastWatermark, recordsToday,
+  errorsToday, currentLagSeconds }. Operators read this on Mondays.
+- DLQ replay: /admin/replay-errors POSTs each failed record back through
+  transform+sink with attempt counter; max-attempts hard cap of 5.
+- A 'records' counter on /metrics so Prometheus can graph throughput.
+`.trim();
+
+const SPEC_SEARCH_SERVICE = `
+# Specialist: search service (hybrid lexical + vector)
+
+You are writing a search backend that does both keyword (BM25-ish) and
+semantic (embeddings) retrieval, then reciprocal-rank-fuses them.
+
+## Hard rules
+
+- Indexing is a separate code path from querying. Indexers run on a
+  queue (BullMQ); querying is synchronous against the persisted index.
+- For lexical: use Postgres full-text search (tsvector + GIN index) OR
+  Mongo Atlas Search. NO Elasticsearch in v1 (operational cost).
+- For vector: use pgvector when persistence=postgres; use Mongo Atlas
+  vector search when persistence=mongodb. Embedding model is
+  text-embedding-3-small (OpenAI) by default; configurable via env.
+- Reciprocal rank fusion (RRF) with k=60 by default. Constant in
+  src/search/rrf.js — never inline.
+- Result re-ranking pass is OPTIONAL and only runs when the env flag
+  RERANK_ENABLED is true; calls Cohere rerank or a local cross-encoder.
+- Embedding cache: every (text, model) pair sha256s into Redis with
+  30-day TTL. NEVER call the embedding API for a string we've seen.
+- Pagination: cursor-based (offset is a footgun on large indices).
+- Filtering: every query accepts a structured filter object validated
+  by Zod; filters are pushed down to the DB BEFORE the vector search.
+
+## File structure
+
+- src/search/index.js          (POST /index, takes a doc, enqueues)
+- src/search/query.js          (POST /search, returns ranked hits)
+- src/search/embed.js          (single canonical embed() with cache)
+- src/search/rrf.js            (the rank-fuser; pure function)
+- src/search/lexical.js        (DB-specific full-text query)
+- src/search/vector.js         (DB-specific vector query)
+- jobs/index-worker.js         (BullMQ consumer for the indexing queue)
+- routes/search.js             (the public surface)
+
+## What you MUST emit
+
+- POST /search { q, filters?, limit?, cursor? } returns { hits, nextCursor }.
+- POST /index { docs: [...] } enqueues to BullMQ; returns { accepted }.
+- DELETE /index/:id removes from both lexical AND vector store
+  atomically (Mongo: same doc; Postgres: same row).
+- GET /search/explain?q=... returns the per-stage scores so debugging is
+  possible. Read-only. Don't expose this to the public form unless the
+  data classification is 'public' or 'internal'.
+`.trim();
+
+const SPEC_INTERNAL_TOOL = `
+# Specialist: internal tool (admin panel with RBAC + audit)
+
+You are writing a Retool-style internal tool — server-rendered HTML pages
+that engineers use to inspect/edit data. NOT customer-facing.
+
+## Hard rules
+
+- Auth: ALWAYS magic_link with the operator's email domain allow-listed
+  in env. NEVER allow public sign-ups. NEVER expose this on the public URL.
+- Every mutation writes an audit row: who, what, before, after, when,
+  reason. The reason field is REQUIRED — no mutations without one.
+- RBAC: two roles only — viewer (read everything) + admin (read + mutate).
+  Roles in env (ADMIN_EMAILS=alice@x.com,bob@x.com).
+- Server-rendered HTML with the same minimal CSS as the form route. No
+  React, no SPA. Speed and simplicity win over polish for internal tools.
+- Every list page has: search, filter, sort, pagination, CSV export.
+- Every detail page has: full record view, edit form (admin only), audit
+  log of past changes, "open in production" link if relevant.
+- Bulk actions are confirmation-gated and write ONE audit row per
+  affected record. NEVER a single audit row for a bulk action.
+- Dangerous actions (delete, refund, force-logout) require a typed
+  confirmation: the operator types the resource ID before the action runs.
+
+## File structure
+
+- src/admin/auth.js          (magic-link issuer + session resolver)
+- src/admin/rbac.js          (requireAdmin + requireViewer middleware)
+- src/admin/audit.js         (the append-only audit log + reason validator)
+- src/admin/render.js        (HTML helper — escapes everything via @argo/security)
+- routes/admin/index.js      (dashboard with quick stats)
+- routes/admin/<resource>.js (list + detail + edit per resource)
+- routes/admin/audit.js      (full audit log explorer)
+- config/admin.json          (resource definitions + columns + filters)
+`.trim();
+
 const SPEC_GENERIC = `
 # Specialist: generic Node.js service
 
@@ -361,6 +492,9 @@ const SPECIALIST_BLOCKS: Record<Specialist, string> = {
   form_workflow: SPEC_FORM_WORKFLOW,
   multi_tenant_saas: SPEC_MULTI_TENANT_SAAS,
   agent_runtime: SPEC_AGENT_RUNTIME,
+  data_pipeline: SPEC_DATA_PIPELINE,
+  search_service: SPEC_SEARCH_SERVICE,
+  internal_tool: SPEC_INTERNAL_TOOL,
   generic: SPEC_GENERIC,
 };
 
@@ -379,14 +513,36 @@ export function pickSpecialist(args: {
     return 'form_workflow';
   }
   // Agent-runtime wins when the operator explicitly asks for an agent.
-  // Keywords cribbed from how operators describe agentic workflows in
-  // practice — "build me an agent that…", "an AI that does X", etc.
   if (
     /\b(ai\s+agent|build\s+(me\s+)?an?\s+agent|llm\s+agent|autonomous|tool[- ]using|agentic|sub[- ]agent|copilot)\b/.test(
       desc,
     )
   ) {
     return 'agent_runtime';
+  }
+  // Search service: lexical OR vector OR hybrid retrieval.
+  if (
+    /\b(search\s+(?:service|engine|index|backend)|semantic\s+search|vector\s+search|embeddings?|rag|retrieval[- ]augment)/i.test(
+      desc,
+    )
+  ) {
+    return 'search_service';
+  }
+  // Data pipeline: ETL / sync / backfill flavour.
+  if (
+    /\b(etl|pipeline|ingest(?:ion)?|sync\s+(?:from|with|data)|backfill|data\s+warehouse|streaming\s+data)\b/.test(
+      desc,
+    )
+  ) {
+    return 'data_pipeline';
+  }
+  // Internal tool: admin panel for the operator's own team.
+  if (
+    /\b(internal\s+tool|admin\s+(?:panel|dashboard|tool)|retool|ops\s+console|back[- ]office)\b/.test(
+      desc,
+    )
+  ) {
+    return 'internal_tool';
   }
   // Hard-mode wins over softer matches when the description names tenancy /
   // OAuth / RBAC / realtime — these are the genuinely complex apps.
@@ -428,5 +584,8 @@ export const ALL_SPECIALISTS: readonly Specialist[] = [
   'form_workflow',
   'multi_tenant_saas',
   'agent_runtime',
+  'data_pipeline',
+  'search_service',
+  'internal_tool',
   'generic',
 ] as const;

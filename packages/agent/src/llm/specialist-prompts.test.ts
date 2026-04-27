@@ -77,6 +77,36 @@ describe('pickSpecialist', () => {
       }),
     ).toBe('agent_runtime');
   });
+
+  it('routes "semantic search" to search_service', () => {
+    expect(
+      pickSpecialist({
+        archetype: 'generic',
+        triggerKind: 'form_submission',
+        description: 'A semantic search backend over my support tickets with embeddings.',
+      }),
+    ).toBe('search_service');
+  });
+
+  it('routes "ETL backfill" to data_pipeline', () => {
+    expect(
+      pickSpecialist({
+        archetype: 'generic',
+        triggerKind: 'scheduled',
+        description: 'An ETL pipeline pulling from Stripe with hourly incremental + nightly backfill.',
+      }),
+    ).toBe('data_pipeline');
+  });
+
+  it('routes "internal admin panel" to internal_tool', () => {
+    expect(
+      pickSpecialist({
+        archetype: 'generic',
+        triggerKind: 'form_submission',
+        description: 'Internal tool for ops to inspect and refund customers, magic-link only.',
+      }),
+    ).toBe('internal_tool');
+  });
 });
 
 describe('buildSpecialistSystemPrompt', () => {

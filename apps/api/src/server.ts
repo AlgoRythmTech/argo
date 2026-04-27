@@ -19,6 +19,9 @@ import { registerWebhookRoutes } from './routes/webhooks.js';
 import { registerRepairsRoutes } from './routes/repairs.js';
 import { registerBuildStreamRoutes } from './routes/build-stream.js';
 import { registerScopingRoutes } from './routes/scoping.js';
+import { registerNotificationsRoutes } from './routes/notifications.js';
+import { registerReplayRoutes } from './routes/replay.js';
+import { registerBillingRoutes } from './routes/billing.js';
 import { registerAuthPlugin } from './plugins/auth-plugin.js';
 import { attachSocketIo } from './realtime/socket.js';
 import { startDigestWorker } from './jobs/digest-worker.js';
@@ -64,6 +67,9 @@ async function main() {
   await registerRepairsRoutes(app);
   await registerBuildStreamRoutes(app);
   await registerScopingRoutes(app);
+  await registerNotificationsRoutes(app);
+  await registerReplayRoutes(app);
+  await registerBillingRoutes(app);
 
   // Eager init.
   await getMongo();
