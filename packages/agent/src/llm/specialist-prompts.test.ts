@@ -57,6 +57,26 @@ describe('pickSpecialist', () => {
       }),
     ).toBe('multi_tenant_saas');
   });
+
+  it('routes "build me an AI agent that …" to agent_runtime', () => {
+    expect(
+      pickSpecialist({
+        archetype: 'generic',
+        triggerKind: 'webhook',
+        description: 'Build me an AI agent that summarises customer support tickets and tags them.',
+      }),
+    ).toBe('agent_runtime');
+  });
+
+  it('routes "tool-using LLM agent" to agent_runtime', () => {
+    expect(
+      pickSpecialist({
+        archetype: 'generic',
+        triggerKind: 'scheduled',
+        description: 'A tool-using LLM agent that runs every morning to triage my inbox.',
+      }),
+    ).toBe('agent_runtime');
+  });
 });
 
 describe('buildSpecialistSystemPrompt', () => {

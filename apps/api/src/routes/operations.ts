@@ -136,6 +136,58 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
   });
 
   /**
+   * GET /api/operations/:id/files/contents?path=...
+   * Returns one file's contents from the latest bundle, read-only. Used by
+   * the syntax-highlighted code viewer. Path is validated against the
+   * persisted manifest to prevent any path-traversal weirdness.
+   */
+  app.get('/api/operations/:id/files/contents', async (request, reply) => {
+    const session = requireSession(request, reply);
+    if (!session) return;
+    const id = String((request.params as { id: string }).id);
+    const path = String((request.query as { path?: string }).path ?? '').trim();
+    if (!path) return reply.code(400).send({ error: 'missing_path' });
+
+    const op = await getPrisma().operation.findFirst({ where: { id, ownerId: session.userId } });
+    if (!op) return reply.code(404).send({ error: 'not_found' });
+
+    const { db } = await getMongo();
+    const bundle = await db
+      .collection('operation_bundles')
+      .find({ operationId: op.id })
+      .sort({ version: -1 })
+      .limit(1)
+      .next();
+    if (!bundle) return reply.code(404).send({ error: 'no_bundle_yet' });
+
+    const files =
+      ((bundle as { files?: Array<{ path: string; contents: string; argoGenerated: boolean; sha256: string }> }).files ?? []);
+    const found = files.find((f) => f.path === path);
+    if (!found) {
+      // Legacy bundles persist only filesSummary; surface a helpful error.
+      const inSummary = ((bundle as { filesSummary?: Array<{ path: string }> }).filesSummary ?? []).some(
+        (f) => f.path === path,
+      );
+      if (inSummary) {
+        return reply.code(409).send({
+          error: 'legacy_bundle_no_contents',
+          message: 'This bundle was generated before per-file persistence. Redeploy to view contents.',
+        });
+      }
+      return reply.code(404).send({ error: 'file_not_found' });
+    }
+
+    return reply.send({
+      operationId: op.id,
+      path: found.path,
+      contents: found.contents,
+      sha256: found.sha256,
+      argoGenerated: found.argoGenerated,
+      bytes: found.contents.length,
+    });
+  });
+
+  /**
    * POST /api/operations/:id/preview-action — the three live-preview controls.
    * refresh = no-op on backend (client bumps the iframe key).
    * restart = restart the running process inside the existing sandbox.

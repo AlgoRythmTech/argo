@@ -133,6 +133,15 @@ export const operations = {
       { operationId: id },
     ),
   files: (id: string) => api.get<GeneratedBundle>(`/api/operations/${id}/files`),
+  fileContents: (id: string, path: string) =>
+    api.get<{
+      operationId: string;
+      path: string;
+      contents: string;
+      sha256: string;
+      argoGenerated: boolean;
+      bytes: number;
+    }>(`/api/operations/${id}/files/contents?path=${encodeURIComponent(path)}`),
   previewAction: (id: string, action: PreviewAction) =>
     api.post<{ ok: true; action: PreviewAction }>(`/api/operations/${id}/preview-action`, {
       action,

@@ -32,6 +32,7 @@ const Body = z.object({
       'slack_bot',
       'form_workflow',
       'multi_tenant_saas',
+      'agent_runtime',
       'generic',
     ])
     .optional(),

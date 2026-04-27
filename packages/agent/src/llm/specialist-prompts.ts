@@ -14,6 +14,7 @@ export type Specialist =
   | 'slack_bot'
   | 'form_workflow' // ← the candidate-intake archetype, our v1 default
   | 'multi_tenant_saas' // ← the hard-mode persona (OAuth + RBAC + migrations + WS)
+  | 'agent_runtime'     // ← Argo ships sub-agents inside the operation
   | 'generic';
 
 const SPEC_REST_API = `
@@ -262,6 +263,87 @@ Battle-tested patterns:
 - config/permissions.json (the role-to-permission map)
 `.trim();
 
+const SPEC_AGENT_RUNTIME = `
+# Specialist: AI-agent runtime (Argo ships a sub-agent inside the operation)
+
+You are writing an Argo operation that contains a long-running AI agent.
+Different from the other specialists — here the operation IS the agent.
+The deterministic Argo runtime calls into the agent on a schedule, on a
+webhook, or on an inbound email; the agent does its work and returns
+structured output Argo persists.
+
+## Hard rules
+
+- The agent is invoked, never autonomous. Argo calls .run(input) and
+  awaits the result. NO infinite loops. NO autonomous re-trigger from
+  inside the agent body. Argo's runtime is the loop; the agent is one
+  iteration.
+- Every tool the agent can call is a typed function in /agent/tools/*.ts
+  with a Zod schema for its arguments AND its return value. Untyped
+  tools are forbidden.
+- Every tool call is logged to runtime_events with the tool name,
+  arguments (PII-redacted), result summary, and duration. Operators
+  audit the agent's behaviour through this stream.
+- The agent's max iteration count is fixed (default 8). At the ceiling,
+  it returns whatever it has and stops. NEVER iterate past the ceiling.
+- The agent NEVER calls tools that mutate third-party systems unless
+  the tool definition's metadata declares { side_effect: true } AND the
+  approval-gate decorator wraps the call. Side-effect tools route through
+  Argo's email approval flow before executing.
+- Conversation memory is bounded — last N=20 messages or 8K tokens,
+  whichever is smaller. Use a deterministic summariser when truncating
+  (no recursive LLM summary calls; that's a token-burn loop).
+
+## File structure
+
+- agent/agent.ts — the .run(input) entry point + iteration controller
+- agent/tools/index.ts — tool registry (one map, all tools imported here)
+- agent/tools/<tool>.ts — one file per tool, exporting { name, description, schema, sideEffect, run }
+- agent/memory.ts — bounded conversation memory + deterministic truncation
+- agent/policies.ts — approval-gate decorator + side-effect classifier
+- agent/llm.ts — the OpenAI/Anthropic client wrapper used by the agent
+- routes/agent.js — POST /agent/run that the Argo runtime hits
+
+## What MUST be in agent/agent.ts
+
+- A typed AgentInput / AgentOutput interface
+- A while-loop that runs at most MAX_ITERATIONS (default 8)
+- Each iteration: send messages to the LLM with the registered tool schemas;
+  if the response includes a tool_use, dispatch to that tool's .run();
+  push the tool result as a message; loop. Exit when the LLM returns a
+  final answer (no tool_use) OR when MAX_ITERATIONS is hit.
+- Telemetry: emit one runtime_event per iteration with { iteration,
+  tools_called, prompt_tokens, completion_tokens }.
+
+## Approval gating for side-effect tools
+
+When the LLM wants to call a side_effect:true tool, the agent MUST:
+  1. Pause the iteration loop.
+  2. POST the tool call to Argo's /internal/agent-approval endpoint with
+     { agentRunId, toolName, args }.
+  3. The control plane sends the operator an approval email (same locked
+     template as Section 8).
+  4. On approval: resume by executing the tool. On decline: synthesise
+     a tool result of { error: 'declined_by_operator' } and let the LLM
+     adapt.
+
+## Cost guard
+
+The agent has a per-run token budget (default 30K total tokens). If the
+budget is exhausted before MAX_ITERATIONS, return an early answer with
+{ truncated: true } in the output. Operators see this in the activity feed.
+
+## Things you MUST NOT do
+
+- NO autonomous deployment of new code from the agent. The agent suggests
+  patches by writing to runtime_events; the existing Argo repair worker
+  picks them up and routes them through approval.
+- NO direct file system writes outside /tmp. The agent operates on data,
+  not on the runtime's own code.
+- NO eval, NO new Function, NO dynamic require.
+- NO third-party LLM provider beyond what's already in package.json.
+`.trim();
+
 const SPEC_GENERIC = `
 # Specialist: generic Node.js service
 
@@ -278,6 +360,7 @@ const SPECIALIST_BLOCKS: Record<Specialist, string> = {
   slack_bot: SPEC_SLACK_BOT,
   form_workflow: SPEC_FORM_WORKFLOW,
   multi_tenant_saas: SPEC_MULTI_TENANT_SAAS,
+  agent_runtime: SPEC_AGENT_RUNTIME,
   generic: SPEC_GENERIC,
 };
 
@@ -294,6 +377,16 @@ export function pickSpecialist(args: {
   const desc = args.description.toLowerCase();
   if (args.archetype === 'candidate_intake' || args.archetype === 'lead_qualification') {
     return 'form_workflow';
+  }
+  // Agent-runtime wins when the operator explicitly asks for an agent.
+  // Keywords cribbed from how operators describe agentic workflows in
+  // practice — "build me an agent that…", "an AI that does X", etc.
+  if (
+    /\b(ai\s+agent|build\s+(me\s+)?an?\s+agent|llm\s+agent|autonomous|tool[- ]using|agentic|sub[- ]agent|copilot)\b/.test(
+      desc,
+    )
+  ) {
+    return 'agent_runtime';
   }
   // Hard-mode wins over softer matches when the description names tenancy /
   // OAuth / RBAC / realtime — these are the genuinely complex apps.
@@ -334,5 +427,6 @@ export const ALL_SPECIALISTS: readonly Specialist[] = [
   'slack_bot',
   'form_workflow',
   'multi_tenant_saas',
+  'agent_runtime',
   'generic',
 ] as const;

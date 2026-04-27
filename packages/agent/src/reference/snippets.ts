@@ -654,6 +654,193 @@ export function registerStripe(app, { redis }) {
 }
 `,
   },
+
+  {
+    id: 'agent-loop',
+    title: 'Bounded agent loop with tool dispatch + telemetry',
+    tags: ['agent_runtime'],
+    purpose:
+      'The canonical agent loop. Iterates at most MAX_ITERATIONS times, dispatches tool calls through a registry, emits one runtime_event per iteration, and exits cleanly on either a final answer OR the iteration ceiling. Bounded — no autonomous re-trigger from inside.',
+    hintedPath: 'agent/agent.js',
+    language: 'js',
+    body: `import { z } from 'zod';
+import { llm } from './llm.js';
+import { tools } from './tools/index.js';
+import { Memory } from './memory.js';
+import { isSideEffect, requireApproval } from './policies.js';
+
+const MAX_ITERATIONS = Number(process.env.AGENT_MAX_ITERATIONS) || 8;
+const MAX_TOTAL_TOKENS = Number(process.env.AGENT_TOKEN_BUDGET) || 30_000;
+
+export const AgentInput = z.object({
+  request: z.string().min(1).max(8000),
+  context: z.record(z.unknown()).optional(),
+});
+
+export const AgentOutput = z.object({
+  answer: z.string(),
+  iterations: z.number().int().nonnegative(),
+  toolsUsed: z.array(z.string()),
+  truncated: z.boolean(),
+  totalTokens: z.number().int().nonnegative(),
+});
+
+export async function runAgent(rawInput, { agentRunId, emit }) {
+  const input = AgentInput.parse(rawInput);
+  const memory = new Memory();
+  memory.push({ role: 'user', content: input.request });
+
+  const toolSchemas = Object.values(tools).map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.schema,
+  }));
+
+  const toolsUsed = new Set();
+  let totalTokens = 0;
+
+  for (let i = 1; i <= MAX_ITERATIONS; i++) {
+    if (totalTokens >= MAX_TOTAL_TOKENS) {
+      const final = memory.lastAssistantText() ?? 'Reached the token budget; here\\'s what I have so far.';
+      return AgentOutput.parse({ answer: final, iterations: i - 1, toolsUsed: [...toolsUsed], truncated: true, totalTokens });
+    }
+
+    const response = await llm.complete({
+      messages: memory.messages(),
+      tools: toolSchemas,
+    });
+    totalTokens += response.usage.total_tokens ?? 0;
+
+    emit({ kind: 'agent_iteration', agentRunId, iteration: i, tools_called: response.toolUses.map((t) => t.name), prompt_tokens: response.usage.prompt_tokens, completion_tokens: response.usage.completion_tokens });
+
+    if (response.toolUses.length === 0) {
+      return AgentOutput.parse({ answer: response.text, iterations: i, toolsUsed: [...toolsUsed], truncated: false, totalTokens });
+    }
+
+    for (const call of response.toolUses) {
+      const tool = tools[call.name];
+      if (!tool) {
+        memory.push({ role: 'tool', toolUseId: call.id, content: { error: 'unknown_tool' } });
+        continue;
+      }
+      const args = tool.schema.parse(call.input);
+      const sideEffect = isSideEffect(tool);
+      const result = sideEffect
+        ? await requireApproval({ agentRunId, toolName: tool.name, args }, () => tool.run(args))
+        : await tool.run(args);
+      toolsUsed.add(tool.name);
+      memory.push({ role: 'tool', toolUseId: call.id, content: result });
+    }
+  }
+
+  const final = memory.lastAssistantText() ?? 'Hit the iteration ceiling without a final answer.';
+  return AgentOutput.parse({ answer: final, iterations: MAX_ITERATIONS, toolsUsed: [...toolsUsed], truncated: true, totalTokens });
+}
+`,
+  },
+
+  {
+    id: 'agent-tool-registry',
+    title: 'Typed tool registry — one Zod-validated tool per file',
+    tags: ['agent_runtime'],
+    purpose:
+      'Every tool the agent can call is a typed function with a Zod schema for both arguments AND result. Untyped tools are forbidden. The registry is a single map; new tools are added by importing them here.',
+    hintedPath: 'agent/tools/index.js',
+    language: 'js',
+    body: `import { searchKnowledgeBase } from './search-knowledge-base.js';
+import { sendEmail } from './send-email.js';
+import { lookupCustomer } from './lookup-customer.js';
+
+// Every tool exports { name, description, schema, sideEffect, run }. The
+// agent loop dispatches by name; the LLM receives the schemas as
+// input_schema fields on its tool definitions.
+export const tools = {
+  [searchKnowledgeBase.name]: searchKnowledgeBase,
+  [sendEmail.name]: sendEmail,                  // sideEffect: true → approval-gated
+  [lookupCustomer.name]: lookupCustomer,
+};
+
+// Example tool body — repeat this shape per file:
+//
+// import { z } from 'zod';
+// export const sendEmail = {
+//   name: 'send_email',
+//   description: 'Send an email to a customer. Requires operator approval.',
+//   sideEffect: true,
+//   schema: z.object({ to: z.string().email(), subject: z.string().min(1).max(300), body: z.string().min(1) }),
+//   resultSchema: z.object({ messageId: z.string() }),
+//   run: async ({ to, subject, body }) => {
+//     const result = await emailClient.send({ to, subject, text: body });
+//     return { messageId: result.providerMessageId };
+//   },
+// };
+`,
+  },
+
+  {
+    id: 'agent-bounded-memory',
+    title: 'Bounded conversation memory with deterministic truncation',
+    tags: ['agent_runtime'],
+    purpose:
+      'Conversation memory bounded by N messages OR token count, whichever is smaller. Truncation is deterministic (drop oldest user/assistant pair, keep system + last few). NO recursive LLM summarisation — that\'s a token-burn loop.',
+    hintedPath: 'agent/memory.js',
+    language: 'js',
+    body: `const MAX_MESSAGES = 20;
+const MAX_TOKEN_ESTIMATE = 8_000;
+
+export class Memory {
+  constructor() {
+    this.system = null;
+    this.history = [];
+  }
+
+  setSystem(prompt) {
+    this.system = { role: 'system', content: prompt };
+  }
+
+  push(msg) {
+    this.history.push(msg);
+    this.compactIfNeeded();
+  }
+
+  messages() {
+    return this.system ? [this.system, ...this.history] : this.history.slice();
+  }
+
+  lastAssistantText() {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      if (this.history[i].role === 'assistant' && typeof this.history[i].content === 'string') {
+        return this.history[i].content;
+      }
+    }
+    return null;
+  }
+
+  compactIfNeeded() {
+    while (this.history.length > MAX_MESSAGES || this.estimateTokens() > MAX_TOKEN_ESTIMATE) {
+      // Drop the oldest user+assistant pair. Keep tool messages adjacent to their assistant.
+      const idx = this.history.findIndex((m) => m.role === 'user');
+      if (idx === -1) break;
+      // Remove the user message and the assistant response (and any tool messages immediately after).
+      this.history.splice(idx, 1);
+      while (this.history[idx] && this.history[idx].role !== 'user') {
+        this.history.splice(idx, 1);
+      }
+    }
+  }
+
+  estimateTokens() {
+    // Rough char/4 heuristic. Good enough for guard-rail purposes.
+    let chars = 0;
+    for (const m of this.history) {
+      const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+      chars += c.length;
+    }
+    return Math.ceil(chars / 4);
+  }
+}
+`,
+  },
 ];
 
 /**

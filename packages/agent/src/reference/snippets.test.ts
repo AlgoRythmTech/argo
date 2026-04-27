@@ -42,6 +42,20 @@ describe('REFERENCE_SNIPPETS', () => {
     expect(picked.some((s) => s.id === 'slack-bolt-app')).toBe(true);
   });
 
+  it('picks all three agent snippets when specialist=agent_runtime', () => {
+    const picked = selectSnippets({
+      trigger: 'webhook',
+      integrations: [],
+      auth: 'none',
+      dataClassification: 'internal',
+      specialist: 'agent_runtime',
+    });
+    const ids = picked.map((s) => s.id);
+    expect(ids).toContain('agent-loop');
+    expect(ids).toContain('agent-tool-registry');
+    expect(ids).toContain('agent-bounded-memory');
+  });
+
   it('picks stripe snippet when stripe integration is set', () => {
     const picked = selectSnippets({
       trigger: 'webhook',

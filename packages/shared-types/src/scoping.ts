@@ -81,6 +81,7 @@ export const ScopingQuestionnaire = z.object({
     'slack_bot',
     'form_workflow',
     'multi_tenant_saas',
+    'agent_runtime',
     'generic',
   ]),
   questions: z.array(ScopingQuestion).min(3).max(8),
