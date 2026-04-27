@@ -231,6 +231,26 @@ export const operations = {
       argoGenerated: boolean;
       bytes: number;
     }>(`/api/operations/${id}/files/contents?path=${encodeURIComponent(path)}`),
+  health: (id: string) =>
+    api.get<{
+      operationId: string;
+      tone: 'good' | 'warn' | 'bad';
+      status: string;
+      lastSubmissionAt: string | null;
+      lastSubmissionAgeMs: number | null;
+      submissionsLast24h: number;
+      submissionsLast7d: number;
+      failedInvocations24h: number;
+      pendingRepairs: number;
+      staleRepairs: number;
+      lastEventAt: string | null;
+      alerts: Array<{
+        severity: 'info' | 'warn' | 'bad';
+        kind: string;
+        message: string;
+      }>;
+      checkedAt: string;
+    }>(`/api/operations/${id}/health`),
   readme: (id: string, regenerate = false) =>
     api.get<{
       operationId: string;

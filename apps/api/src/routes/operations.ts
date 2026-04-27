@@ -535,6 +535,145 @@ export async function registerOperationsRoutes(app: FastifyInstance) {
   });
 
   /**
+   * GET /api/operations/:id/health
+   *
+   * One-glance health snapshot for the workspace HealthBadge and the
+   * monthly check-in. Aggregates from:
+   *   - submissions collection (volume, last activity)
+   *   - agent_invocations (failed LLM calls in last 24h)
+   *   - operation_repairs (pending approvals + stale ones)
+   *   - operations Postgres row (status, lastEventAt)
+   *
+   * Returns a top-level tone (good/warn/bad) computed from the alerts
+   * array so the UI can color the badge without re-deriving the rule.
+   */
+  app.get('/api/operations/:id/health', async (request, reply) => {
+    const session = requireSession(request, reply);
+    if (!session) return;
+    const id = String((request.params as { id: string }).id);
+    const op = await getPrisma().operation.findFirst({ where: { id, ownerId: session.userId } });
+    if (!op) return reply.code(404).send({ error: 'not_found' });
+
+    const { db } = await getMongo();
+    const now = Date.now();
+    const day = 86_400_000;
+    const oneDayAgo = new Date(now - day).toISOString();
+    const sevenDaysAgo = new Date(now - 7 * day).toISOString();
+
+    const [
+      lastSubmission,
+      submissionsLast24h,
+      submissionsLast7d,
+      failedInvocations24h,
+      pendingRepairs,
+      staleRepairs,
+    ] = await Promise.all([
+      db
+        .collection('submissions')
+        .find({ operationId: op.id })
+        .sort({ createdAt: -1 })
+        .limit(1)
+        .next(),
+      db.collection('submissions').countDocuments({
+        operationId: op.id,
+        createdAt: { $gte: oneDayAgo },
+      }),
+      db.collection('submissions').countDocuments({
+        operationId: op.id,
+        createdAt: { $gte: sevenDaysAgo },
+      }),
+      db.collection('agent_invocations').countDocuments({
+        operationId: op.id,
+        createdAt: { $gte: oneDayAgo },
+        status: { $in: ['failed_parse', 'failed_provider'] },
+      }),
+      db.collection('operation_repairs').countDocuments({
+        operationId: op.id,
+        status: 'awaiting_approval',
+      }),
+      db.collection('operation_repairs').countDocuments({
+        operationId: op.id,
+        status: 'awaiting_approval',
+        approvalEmailedAt: { $lt: new Date(now - 4 * 3_600_000).toISOString() },
+      }),
+    ]);
+
+    const lastSubmissionAt =
+      (lastSubmission as { createdAt?: string } | null)?.createdAt ?? null;
+    const lastSubmissionAgeMs = lastSubmissionAt
+      ? now - new Date(lastSubmissionAt).getTime()
+      : null;
+
+    type Alert = {
+      severity: 'info' | 'warn' | 'bad';
+      kind: string;
+      message: string;
+    };
+    const alerts: Alert[] = [];
+
+    if (op.status === 'failed_build') {
+      alerts.push({
+        severity: 'bad',
+        kind: 'build_failed',
+        message: 'Last build failed. Re-deploy from the workspace toolbar.',
+      });
+    } else if (op.status === 'paused') {
+      alerts.push({
+        severity: 'warn',
+        kind: 'paused',
+        message: 'Operation is paused. Submissions are queued but not processed.',
+      });
+    }
+
+    if (op.publicUrl && lastSubmissionAt && lastSubmissionAgeMs! > 14 * day) {
+      alerts.push({
+        severity: 'warn',
+        kind: 'stale',
+        message: `No submissions in ${Math.round(lastSubmissionAgeMs! / day)} days. Surface still live; check the public URL.`,
+      });
+    }
+
+    if (failedInvocations24h > 0) {
+      alerts.push({
+        severity: failedInvocations24h >= 5 ? 'bad' : 'warn',
+        kind: 'failed_invocations',
+        message: `${failedInvocations24h} agent call${failedInvocations24h === 1 ? '' : 's'} failed in the last 24h.`,
+      });
+    }
+
+    if (staleRepairs > 0) {
+      alerts.push({
+        severity: 'warn',
+        kind: 'stale_approval',
+        message: `${staleRepairs} repair approval${staleRepairs === 1 ? '' : 's'} waiting on you for over 4 hours.`,
+      });
+    }
+
+    // Tone is the worst alert severity; if none, "good".
+    const tone: 'good' | 'warn' | 'bad' = alerts.some((a) => a.severity === 'bad')
+      ? 'bad'
+      : alerts.some((a) => a.severity === 'warn')
+      ? 'warn'
+      : 'good';
+
+    return reply.send({
+      operationId: op.id,
+      tone,
+      status: op.status,
+      lastSubmissionAt,
+      lastSubmissionAgeMs,
+      submissionsLast24h,
+      submissionsLast7d,
+      failedInvocations24h,
+      pendingRepairs,
+      staleRepairs,
+      lastEventAt: op.lastEventAt,
+      alerts,
+      checkedAt: new Date().toISOString(),
+    });
+  });
+
+  /**
    * GET /api/operations/:id/readme[?regenerate=true]
    *
    * On-demand operation README. Cached per (operationId, bundleVersion)

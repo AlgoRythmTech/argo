@@ -23,6 +23,7 @@ import { ScopingPanel } from '../components/ScopingPanel.js';
 import { BuildStream } from '../components/BuildStream.js';
 import { SpendBadge } from '../components/SpendBadge.js';
 import { OperationReadmeButton } from '../components/OperationReadmeButton.js';
+import { HealthBadge } from '../components/HealthBadge.js';
 import { cn } from '../lib/utils.js';
 
 type BuilderState =
@@ -265,6 +266,7 @@ export function Workspace() {
                 {activeOp?.name ?? 'Describe a workflow to get started'}
               </div>
             </div>
+            {activeOp && <HealthBadge operationId={activeOp.id} />}
             {activeOp && <SpendBadge operationId={activeOp.id} />}
             {activeOp && <OperationReadmeButton operationId={activeOp.id} />}
           </div>
