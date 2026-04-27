@@ -7,6 +7,7 @@ import { SignIn } from './pages/SignIn.js';
 import { Workspace } from './pages/Workspace.js';
 import { RepairReview } from './pages/RepairReview.js';
 import { CommandPalette } from './components/CommandPalette.js';
+import { OnboardingTour } from './components/OnboardingTour.js';
 
 export function App() {
   const view = useArgo((s) => s.view);
@@ -66,6 +67,7 @@ export function App() {
     <>
       {page}
       <CommandPalette />
+      {view === 'workspace' && <OnboardingTour />}
     </>
   );
 }

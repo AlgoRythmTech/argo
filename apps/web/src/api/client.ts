@@ -170,6 +170,19 @@ export const billing = {
   checkout: (input?: { successPath?: string; cancelPath?: string }) =>
     api.post<{ url: string | null; sessionId: string }>('/api/billing/checkout', input ?? {}),
   portal: () => api.post<{ url: string }>('/api/billing/portal', {}),
+  usage: () =>
+    api.get<{
+      totalUsd: number;
+      monthStart: string;
+      perOperation: Array<{
+        operationId: string | null;
+        operationName: string | null;
+        totalUsd: number;
+        invocations: number;
+        promptTokens: number;
+        completionTokens: number;
+      }>;
+    }>('/api/billing/usage'),
 };
 
 export type GeneratedFileSummary = {

@@ -21,6 +21,7 @@ import { Input } from '../components/ui/input.js';
 import { PreviewPane } from '../components/PreviewPane.js';
 import { ScopingPanel } from '../components/ScopingPanel.js';
 import { BuildStream } from '../components/BuildStream.js';
+import { SpendBadge } from '../components/SpendBadge.js';
 import { cn } from '../lib/utils.js';
 
 type BuilderState =
@@ -254,13 +255,16 @@ export function Workspace() {
       {/* ── Center: workspace ─────────────────────────────────────── */}
       <main className="flex flex-col overflow-hidden">
         <header className="border-b border-argo-border px-6 py-4 flex items-center justify-between">
-          <div>
-            <div className="text-argo-textSecondary text-xs font-mono uppercase tracking-widest">
-              Operation
+          <div className="flex items-center gap-3">
+            <div>
+              <div className="text-argo-textSecondary text-xs font-mono uppercase tracking-widest">
+                Operation
+              </div>
+              <div className="text-xl font-semibold text-argo-text">
+                {activeOp?.name ?? 'Describe a workflow to get started'}
+              </div>
             </div>
-            <div className="text-xl font-semibold text-argo-text">
-              {activeOp?.name ?? 'Describe a workflow to get started'}
-            </div>
+            {activeOp && <SpendBadge operationId={activeOp.id} />}
           </div>
           <div className="flex items-center gap-2">
             {activeOp?.publicUrl && (

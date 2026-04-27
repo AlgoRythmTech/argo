@@ -11,6 +11,7 @@ import {
 } from '@argo/shared-types';
 import { renderEnvelopeAsPrompt } from './envelope.js';
 import type { LlmRouter, LlmCallResult } from './llm/router.js';
+import { estimateCost } from './cost/pricing.js';
 
 const log = pino({ name: 'agent-invocation', level: process.env.LOG_LEVEL ?? 'info' });
 
@@ -194,6 +195,15 @@ async function persist(
     completedAt: string;
   },
 ): Promise<void> {
+  // Compute cost from token counts when the provider didn't tell us upfront.
+  if (raw.costUsd === null && raw.promptTokens !== null && raw.completionTokens !== null) {
+    const breakdown = estimateCost({
+      model: raw.model,
+      promptTokens: raw.promptTokens,
+      completionTokens: raw.completionTokens,
+    });
+    raw.costUsd = breakdown.totalUsd;
+  }
   const safe = AgentInvocation.parse(raw);
   await store.insert({
     ...safe,

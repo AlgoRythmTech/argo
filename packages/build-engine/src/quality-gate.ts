@@ -37,7 +37,16 @@ export type QualityCheckId =
   | 'public_post_routes_have_rate_limit'
   | 'no_secrets_in_error_messages'
   | 'no_open_cors_in_prod'
-  | 'no_http_in_outbound_urls';
+  | 'no_http_in_outbound_urls'
+  // ── v3 hardening (Day 4 part 2): operational + reliability checks ──
+  | 'no_missing_await_on_async'
+  | 'helmet_registered'
+  | 'body_limit_set'
+  | 'fastify_error_handler_set'
+  | 'mongo_collection_has_indexes'
+  | 'route_sets_content_type'
+  | 'no_exposed_stack_traces'
+  | 'request_logger_in_handlers';
 
 export interface QualityIssue {
   check: QualityCheckId;
@@ -79,12 +88,21 @@ export function runQualityGate(bundle: OperationBundle): QualityReport {
     issues.push(...checkSecretsInErrors(file));
     issues.push(...checkOpenCors(file));
     issues.push(...checkHttpOutboundUrls(file));
+    // v3 hardening
+    issues.push(...checkMissingAwait(file));
+    issues.push(...checkExposedStackTraces(file));
+    issues.push(...checkRequestLogger(file));
+    issues.push(...checkRouteSetsContentType(file));
   }
 
   issues.push(...checkServerBootstrap(bundle));
   issues.push(...checkPackageJson(bundle));
   issues.push(...checkRouteValidation(bundle));
   issues.push(...checkPublicRoutesHaveRateLimit(bundle));
+  issues.push(...checkHelmetRegistered(bundle));
+  issues.push(...checkBodyLimitSet(bundle));
+  issues.push(...checkFastifyErrorHandler(bundle));
+  issues.push(...checkMongoIndexes(bundle));
 
   const errorCount = issues.filter((i) => i.severity === 'error').length;
   const warnCount = issues.filter((i) => i.severity === 'warn').length;
@@ -594,6 +612,172 @@ function checkHttpOutboundUrls(f: OperationBundleFile): QualityIssue[] {
     }
   });
   return out;
+}
+
+// ── v3: operational + reliability ──────────────────────────────────────
+
+function checkMissingAwait(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  // async function calls used as statements (no await, no .then, no return).
+  // Pattern: line that starts with `something(...)` where the function name is
+  // in our known-async set. Conservative: only flag mongo / fetch / undici / fs/promises.
+  const ASYNC_CALLERS = /\b(?:findOne|findOneAndUpdate|insertOne|insertMany|updateOne|updateMany|deleteOne|deleteMany|fetch|undici\.request|request|fs\.promises\.\w+)\s*\(/;
+  lines.forEach((line, idx) => {
+    if (/^\s*(?:await|return|const|let|var|throw|yield|\}|,)\b/.test(line)) return;
+    if (/\.(then|catch|finally)\s*\(/.test(line)) return;
+    if (ASYNC_CALLERS.test(line)) {
+      out.push({
+        check: 'no_missing_await_on_async',
+        severity: 'warn',
+        file: f.path,
+        line: idx + 1,
+        message:
+          'Async call without await/.then/.catch — the result is dropped on the floor and errors swallow silently.',
+      });
+    }
+  });
+  return out;
+}
+
+function checkExposedStackTraces(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  lines.forEach((line, idx) => {
+    if (
+      /(?:reply\.send|res\.send|res\.json)\s*\([^)]*\b(?:err|error)\.stack\b/.test(line) ||
+      /(?:reply\.send|res\.send|res\.json)\s*\([^)]*\bnew\s+Error\s*\([^)]*\)\s*\)/.test(line)
+    ) {
+      out.push({
+        check: 'no_exposed_stack_traces',
+        severity: 'error',
+        file: f.path,
+        line: idx + 1,
+        message:
+          'Don\'t send err.stack or raw Error objects to clients. Return a structured { error, message, requestId } body and log the stack server-side.',
+      });
+    }
+  });
+  return out;
+}
+
+function checkRequestLogger(f: OperationBundleFile): QualityIssue[] {
+  if (!/\.(ts|tsx|js|mjs|cjs)$/i.test(f.path)) return [];
+  // Only check route files.
+  if (!/^routes\/|^src\/routes\//.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const usesAppLog = /\bapp\.log\b|\breq\.log\b|\brequest\.log\b/.test(f.contents);
+  if (!usesAppLog && f.contents.length > 400) {
+    out.push({
+      check: 'request_logger_in_handlers',
+      severity: 'warn',
+      file: f.path,
+      line: null,
+      message:
+        'Route file has no req.log usage. Use req.log.info({...}) inside handlers so logs auto-correlate with the request id.',
+    });
+  }
+  return out;
+}
+
+function checkRouteSetsContentType(f: OperationBundleFile): QualityIssue[] {
+  if (!/^routes\/|^src\/routes\//.test(f.path)) return [];
+  if (!/\.(ts|js)$/i.test(f.path)) return [];
+  const out: QualityIssue[] = [];
+  const lines = f.contents.split('\n');
+  lines.forEach((line, idx) => {
+    // reply.send(string) without a setContentType — emits text/plain by default.
+    const m = line.match(/reply\.send\s*\(\s*['"`]/);
+    if (m) {
+      const surrounding = lines.slice(Math.max(0, idx - 6), idx + 1).join('\n');
+      if (!/reply\.(?:type|header)\s*\(/.test(surrounding)) {
+        out.push({
+          check: 'route_sets_content_type',
+          severity: 'warn',
+          file: f.path,
+          line: idx + 1,
+          message:
+            'Sending a string body without reply.type(...) — clients get text/plain. Set reply.type("application/json") or "text/html".',
+        });
+      }
+    }
+  });
+  return out;
+}
+
+function checkHelmetRegistered(bundle: OperationBundle): QualityIssue[] {
+  const server = bundle.files.find((f) => f.path === 'server.js' || f.path === 'src/server.ts');
+  if (!server) return [];
+  if (/@fastify\/helmet|require\(['"`]@fastify\/helmet['"`]\)|from\s+['"`]@fastify\/helmet['"`]/.test(server.contents))
+    return [];
+  return [
+    {
+      check: 'helmet_registered',
+      severity: 'warn',
+      file: server.path,
+      line: null,
+      message:
+        '@fastify/helmet not registered — sets security headers (CSP, X-Frame-Options, HSTS) for free. Add: await app.register(helmet, { global: true }).',
+    },
+  ];
+}
+
+function checkBodyLimitSet(bundle: OperationBundle): QualityIssue[] {
+  const server = bundle.files.find((f) => f.path === 'server.js' || f.path === 'src/server.ts');
+  if (!server) return [];
+  if (/bodyLimit\s*:\s*\d/.test(server.contents)) return [];
+  return [
+    {
+      check: 'body_limit_set',
+      severity: 'warn',
+      file: server.path,
+      line: null,
+      message:
+        'Fastify\'s default body limit is 1MB. Set { bodyLimit: 2_000_000 } (or your specific cap) explicitly so the limit is intentional.',
+    },
+  ];
+}
+
+function checkFastifyErrorHandler(bundle: OperationBundle): QualityIssue[] {
+  const hasHandler = bundle.files.some(
+    (f) => /\bsetErrorHandler\s*\(/.test(f.contents) && /\.(ts|js|mjs|cjs)$/i.test(f.path),
+  );
+  if (hasHandler) return [];
+  const server = bundle.files.find((f) => f.path === 'server.js' || f.path === 'src/server.ts');
+  if (!server) return [];
+  return [
+    {
+      check: 'fastify_error_handler_set',
+      severity: 'warn',
+      file: server.path,
+      line: null,
+      message:
+        'No app.setErrorHandler() — uncaught route errors emit Fastify\'s default 500 with no log shape. Set a handler that emits to the observability sidecar.',
+    },
+  ];
+}
+
+function checkMongoIndexes(bundle: OperationBundle): QualityIssue[] {
+  // Find any file that creates a Mongo collection but never createIndex.
+  const out: QualityIssue[] = [];
+  const usesMongo = bundle.files.some((f) => /\bdb\.collection\(/.test(f.contents));
+  if (!usesMongo) return [];
+  const declaresIndexes = bundle.files.some(
+    (f) => /createIndex\s*\(/.test(f.contents) || /ensureIndexes/.test(f.contents),
+  );
+  if (declaresIndexes) return [];
+  return [
+    {
+      check: 'mongo_collection_has_indexes',
+      severity: 'warn',
+      file: '(bundle)',
+      line: null,
+      message:
+        'Mongo collections used but no createIndex() calls anywhere. Add an indexes ensure-script (schema/indexes.js) that runs on boot.',
+    },
+  ];
 }
 
 function checkPublicRoutesHaveRateLimit(bundle: OperationBundle): QualityIssue[] {

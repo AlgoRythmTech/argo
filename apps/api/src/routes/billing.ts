@@ -83,6 +83,63 @@ export async function registerBillingRoutes(app: FastifyInstance) {
     return reply.send({ url: checkout.url, sessionId: checkout.id });
   });
 
+  /**
+   * GET /api/billing/usage
+   * Returns the current month's LLM spend per operation + the global total.
+   * Sourced from agent_invocations.costUsd (set by estimateCost() on every
+   * persist).
+   */
+  app.get('/api/billing/usage', async (request, reply) => {
+    const session = requireSession(request, reply);
+    if (!session) return;
+    const { db } = await getMongo();
+    const ops = await getPrisma().operation.findMany({
+      where: { ownerId: session.userId },
+      select: { id: true, name: true, status: true },
+    });
+    type Op = { id: string; name: string; status: string };
+    const ownedIds = new Set(ops.map((o: Op) => o.id));
+    if (ownedIds.size === 0) {
+      return reply.send({ totalUsd: 0, monthStart: monthStartIso(), perOperation: [] });
+    }
+
+    const monthStart = monthStartIso();
+    const grouped = await db
+      .collection('agent_invocations')
+      .aggregate([
+        { $match: { ownerId: session.userId, createdAt: { $gte: monthStart } } },
+        {
+          $group: {
+            _id: '$operationId',
+            totalUsd: { $sum: { $ifNull: ['$costUsd', 0] } },
+            invocations: { $sum: 1 },
+            promptTokens: { $sum: { $ifNull: ['$promptTokens', 0] } },
+            completionTokens: { $sum: { $ifNull: ['$completionTokens', 0] } },
+          },
+        },
+      ])
+      .toArray();
+
+    const opNameById = new Map(ops.map((o: Op) => [o.id, o.name]));
+    const perOperation = grouped
+      .filter((g) => !g._id || ownedIds.has(String(g._id)))
+      .map((g) => ({
+        operationId: (g._id as string | null) ?? null,
+        operationName: g._id ? opNameById.get(String(g._id)) ?? null : null,
+        totalUsd: Number(g.totalUsd ?? 0),
+        invocations: Number(g.invocations ?? 0),
+        promptTokens: Number(g.promptTokens ?? 0),
+        completionTokens: Number(g.completionTokens ?? 0),
+      }))
+      .sort((a, b) => b.totalUsd - a.totalUsd);
+
+    return reply.send({
+      totalUsd: perOperation.reduce((s, p) => s + p.totalUsd, 0),
+      monthStart,
+      perOperation,
+    });
+  });
+
   app.post('/api/billing/portal', async (request, reply) => {
     const session = requireSession(request, reply);
     if (!session) return;
@@ -152,4 +209,9 @@ export async function registerBillingRoutes(app: FastifyInstance) {
     }
     return reply.send({ ok: true });
   });
+}
+
+function monthStartIso(): string {
+  const d = new Date();
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString();
 }
