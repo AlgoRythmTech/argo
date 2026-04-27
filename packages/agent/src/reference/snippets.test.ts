@@ -68,6 +68,64 @@ describe('REFERENCE_SNIPPETS', () => {
     expect(picked.some((s) => s.id === 'magic-link-auth')).toBe(true);
   });
 
+  it('picks SSE + websocket-auth-handshake when specialist is internal_tool', () => {
+    const picked = selectSnippets({
+      trigger: 'webhook',
+      integrations: [],
+      auth: 'magic_link',
+      dataClassification: 'internal',
+      specialist: 'internal_tool',
+    });
+    const ids = picked.map((s) => s.id);
+    expect(ids).toContain('sse-streaming');
+    expect(ids).toContain('websocket-auth-handshake');
+  });
+
+  it('picks idempotency-key-table for crud_app + form_workflow + rest_api builds', () => {
+    for (const specialist of ['crud_app', 'rest_api', 'webhook_bridge']) {
+      const picked = selectSnippets({
+        trigger: 'form_submission',
+        integrations: [],
+        auth: 'none',
+        dataClassification: 'internal',
+        specialist,
+      });
+      const ids = picked.map((s) => s.id);
+      expect(ids, `specialist=${specialist}`).toContain('idempotency-key-table');
+    }
+  });
+
+  it('picks multi-tenant-rls when specialist is multi_tenant_saas', () => {
+    const picked = selectSnippets({
+      trigger: 'form_submission',
+      integrations: [],
+      auth: 'magic_link',
+      dataClassification: 'pii',
+      specialist: 'multi_tenant_saas',
+    });
+    const ids = picked.map((s) => s.id);
+    expect(ids).toContain('multi-tenant-rls');
+  });
+
+  it('picks oauth2-pkce-callback only when auth=oauth2', () => {
+    const withOauth = selectSnippets({
+      trigger: 'webhook',
+      integrations: [],
+      auth: 'oauth2',
+      dataClassification: 'internal',
+      specialist: 'multi_tenant_saas',
+    });
+    const without = selectSnippets({
+      trigger: 'webhook',
+      integrations: [],
+      auth: 'magic_link',
+      dataClassification: 'internal',
+      specialist: 'crud_app',
+    });
+    expect(withOauth.some((s) => s.id === 'oauth2-pkce-callback')).toBe(true);
+    expect(without.some((s) => s.id === 'oauth2-pkce-callback')).toBe(false);
+  });
+
   it('renderSnippetsAsPromptSection produces the expected header and code fences', () => {
     const picked = selectSnippets({
       trigger: 'form_submission',

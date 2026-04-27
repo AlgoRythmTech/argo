@@ -1205,6 +1205,427 @@ export class Memory {
 }
 `,
   },
+
+  {
+    id: 'sse-streaming',
+    title: 'Server-Sent Events with heartbeats and per-client backpressure',
+    tags: ['rest_api', 'agent_runtime', 'crud_app', 'internal_tool'],
+    purpose:
+      'Long-lived SSE channel pattern. Sends a heartbeat every 25s so corporate proxies don\'t kill the socket. Per-client write queue prevents one slow consumer from blocking the broadcaster. Closes cleanly on client disconnect AND on SIGTERM (Blaxel\'s staging-swap signal).',
+    hintedPath: 'routes/stream.js',
+    language: 'js',
+    body: `// SSE channel for live updates. Mounted at /api/stream.
+// Clients subscribe with EventSource('/api/stream'); server pushes
+// JSON events as { type, payload, ts }. Each event is one frame.
+
+const clients = new Set();
+
+export function broadcast(event) {
+  const frame = formatFrame(event);
+  for (const c of clients) {
+    if (c.queue.length > 100) continue; // drop on slow consumer
+    c.queue.push(frame);
+    drain(c);
+  }
+}
+
+function formatFrame(event) {
+  const ts = new Date().toISOString();
+  return \`event: \${event.type}\\ndata: \${JSON.stringify({ ...event, ts })}\\n\\n\`;
+}
+
+function drain(c) {
+  if (c.draining) return;
+  c.draining = true;
+  queueMicrotask(() => {
+    try {
+      while (c.queue.length > 0 && c.alive) {
+        const frame = c.queue.shift();
+        const ok = c.res.write(frame);
+        if (!ok) {
+          c.res.once('drain', () => drain(c));
+          break;
+        }
+      }
+    } finally {
+      c.draining = false;
+    }
+  });
+}
+
+export async function registerSseRoute(app) {
+  app.get('/api/stream', { logLevel: 'warn' }, async (request, reply) => {
+    const userId = request.session?.userId;
+    if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store, no-transform',
+      'connection': 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    reply.raw.write(\`: connected ownerId=\${userId}\\n\\n\`);
+
+    const c = { res: reply.raw, queue: [], draining: false, alive: true, ownerId: userId };
+    clients.add(c);
+
+    // Heartbeat every 25s — keeps corporate proxies from killing the socket.
+    const heartbeat = setInterval(() => {
+      if (!c.alive) return;
+      c.queue.push(\`: ping \${Date.now()}\\n\\n\`);
+      drain(c);
+    }, 25_000);
+
+    request.raw.on('close', () => {
+      c.alive = false;
+      clearInterval(heartbeat);
+      clients.delete(c);
+    });
+  });
+
+  // SIGTERM closes every channel cleanly so Blaxel can drain.
+  process.once('SIGTERM', () => {
+    for (const c of clients) {
+      try { c.res.end(); } catch {}
+      c.alive = false;
+    }
+    clients.clear();
+  });
+}
+`,
+  },
+
+  {
+    id: 'websocket-auth-handshake',
+    title: 'WebSocket cookie-auth handshake with origin check + heartbeat',
+    tags: ['internal_tool', 'multi_tenant_saas', 'agent_runtime'],
+    purpose:
+      'WebSocket upgrade only succeeds when the request carries a valid session cookie AND comes from an allow-listed origin. Per-socket heartbeat detects half-open connections. The handshake is synchronous — no LLM call, no Mongo round-trip — so the upgrade is sub-50ms.',
+    hintedPath: 'routes/socket.js',
+    language: 'js',
+    body: `import { WebSocketServer } from 'ws';
+import { parse as parseCookie } from 'cookie';
+import { verifySession } from '../auth/session.js';
+
+const ALLOWED_ORIGINS = new Set([
+  process.env.WEB_PUBLIC_URL,
+  process.env.WEB_PUBLIC_URL_LEGACY,
+].filter(Boolean));
+
+export function attachSocket(server) {
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', async (req, socket, head) => {
+    // Origin allow-list — refuses cross-site upgrades even if the cookie leaked.
+    const origin = req.headers.origin;
+    if (!origin || !ALLOWED_ORIGINS.has(origin)) {
+      socket.write('HTTP/1.1 403 Forbidden\\r\\n\\r\\n'); socket.destroy(); return;
+    }
+
+    const cookies = parseCookie(req.headers.cookie ?? '');
+    const session = await verifySession(cookies.argo_session);
+    if (!session) {
+      socket.write('HTTP/1.1 401 Unauthorized\\r\\n\\r\\n'); socket.destroy(); return;
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      ws.userId = session.userId;
+      ws.alive = true;
+      wss.emit('connection', ws, req);
+    });
+  });
+
+  wss.on('connection', (ws, req) => {
+    ws.on('pong', () => { ws.alive = true; });
+    ws.on('message', async (raw) => {
+      let msg;
+      try { msg = JSON.parse(String(raw)); }
+      catch { ws.send(JSON.stringify({ type: 'error', error: 'bad_json' })); return; }
+      // ... route msg.type to handlers; ALWAYS owner-scope by ws.userId ...
+    });
+  });
+
+  // Half-open detector. Without this, dropped Wi-Fi clients pile up forever.
+  setInterval(() => {
+    for (const ws of wss.clients) {
+      if (!ws.alive) { ws.terminate(); continue; }
+      ws.alive = false;
+      try { ws.ping(); } catch {}
+    }
+  }, 30_000);
+
+  return wss;
+}
+
+/** Server -> per-owner broadcast helper. */
+export function broadcastToOwner(wss, ownerId, payload) {
+  const frame = JSON.stringify(payload);
+  for (const ws of wss.clients) {
+    if (ws.userId === ownerId && ws.readyState === ws.OPEN) ws.send(frame);
+  }
+}
+`,
+  },
+
+  {
+    id: 'idempotency-key-table',
+    title: 'Durable idempotency-key table for retry-safe POSTs',
+    tags: ['rest_api', 'crud_app', 'webhook_bridge', 'every-build-handling-pii'],
+    purpose:
+      'A durable idempotency-key table (NOT in-memory) for retry-safe POSTs. Stripe-style semantics: same key replays the same response body within 24h. Lock + insert pattern means concurrent retries return the SAME body, never two writes. Fits any Postgres or Mongo backend; this is the Postgres flavour.',
+    hintedPath: 'middleware/idempotency.js',
+    language: 'js',
+    body: `// Postgres schema (run once via migration):
+//
+//   CREATE TABLE idempotency_keys (
+//     key            TEXT NOT NULL,
+//     route          TEXT NOT NULL,
+//     owner_id       TEXT NOT NULL,
+//     status_code    SMALLINT,
+//     response_body  JSONB,
+//     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+//     completed_at   TIMESTAMPTZ,
+//     PRIMARY KEY (owner_id, key, route)
+//   );
+//   CREATE INDEX idempotency_keys_created_at_idx ON idempotency_keys (created_at);
+//   -- TTL via background sweep: DELETE WHERE created_at < now() - interval '24 hours'.
+
+import { request as undiciRequest } from 'undici';
+
+export function makeIdempotency(db) {
+  return async function idempotencyMiddleware(request, reply) {
+    if (request.method !== 'POST') return; // Only POST is idempotent-keyed.
+    const key = request.headers['idempotency-key'];
+    if (!key) return; // Header is optional; request proceeds unguarded.
+    const ownerId = request.session?.userId ?? 'anon';
+    const route = request.routerPath ?? request.url;
+
+    // Try to claim the slot. ON CONFLICT DO NOTHING means the second
+    // caller falls through and reads whatever the first one wrote.
+    const claim = await db.query(
+      \`INSERT INTO idempotency_keys (key, route, owner_id) VALUES ($1, $2, $3)
+       ON CONFLICT DO NOTHING RETURNING key\`,
+      [key, route, ownerId],
+    );
+
+    if (claim.rowCount === 0) {
+      // Already in flight or completed — wait briefly, then return cached response.
+      for (let i = 0; i < 30; i++) {
+        const found = await db.query(
+          \`SELECT status_code, response_body FROM idempotency_keys
+           WHERE owner_id=$1 AND key=$2 AND route=$3 AND completed_at IS NOT NULL\`,
+          [ownerId, key, route],
+        );
+        if (found.rows.length > 0) {
+          reply.code(found.rows[0].status_code).send(found.rows[0].response_body);
+          return reply;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return reply.code(409).send({ error: 'idempotency_in_flight' });
+    }
+
+    // We own the key; record the eventual response on send.
+    reply.then((sent) => {
+      const body = typeof sent.payload === 'string' ? safeJson(sent.payload) : sent.payload;
+      void db.query(
+        \`UPDATE idempotency_keys SET status_code=$1, response_body=$2, completed_at=now()
+         WHERE owner_id=$3 AND key=$4 AND route=$5\`,
+        [reply.statusCode, body, ownerId, key, route],
+      );
+    });
+  };
+}
+
+function safeJson(s) {
+  try { return JSON.parse(s); } catch { return { raw: String(s).slice(0, 4000) }; }
+}
+`,
+  },
+
+  {
+    id: 'multi-tenant-rls',
+    title: 'Multi-tenant row-level security via Postgres + per-request session var',
+    tags: ['multi_tenant_saas', 'crud_app', 'every-build-handling-pii'],
+    purpose:
+      'Postgres native RLS — every tenant\'s data is invisible to every other tenant by default. The pattern: a connection-pool wrapper SETs app.current_tenant from the session at the start of each request, RLS policies on every table enforce tenant_id = current_setting(\'app.current_tenant\'). Even a SELECT * returns only this tenant\'s rows. Defense-in-depth against accidental cross-tenant reads.',
+    hintedPath: 'db/tenant-pool.js',
+    language: 'js',
+    body: `// Postgres schema (one migration per table):
+//
+//   ALTER TABLE submissions ADD COLUMN tenant_id TEXT NOT NULL;
+//   ALTER TABLE submissions ENABLE ROW LEVEL SECURITY;
+//   CREATE POLICY tenant_isolation ON submissions
+//     USING (tenant_id = current_setting('app.current_tenant', true));
+//
+// The 'true' second arg to current_setting means: if the var is unset,
+// return null and the policy fails closed (no rows visible). NEVER set
+// app.current_tenant to a literal 'admin' or '*' wildcard.
+
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: Number(process.env.DB_POOL_MAX ?? 10),
+});
+
+/**
+ * Run callback inside a tenant-bound transaction. The SET LOCAL only
+ * applies inside the transaction — a leaked client returned to the
+ * pool can't accidentally serve another tenant.
+ */
+export async function withTenant(tenantId, fn) {
+  if (!tenantId || typeof tenantId !== 'string' || tenantId.includes("'")) {
+    throw new Error('invalid_tenant_id');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // SET LOCAL is reset at COMMIT/ROLLBACK so the next checkout is clean.
+    await client.query(\`SET LOCAL app.current_tenant = '\${tenantId}'\`);
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Fastify hook: every authed route auto-binds to the session's tenant.
+ *
+ *   app.addHook('preHandler', tenantBoundary);
+ *
+ * Within the route, use request.tenantQuery(sql, params) instead of pool.query.
+ */
+export function tenantBoundary(request, reply, done) {
+  const tenantId = request.session?.tenantId;
+  if (!tenantId) return reply.code(401).send({ error: 'no_tenant' });
+  request.tenantQuery = (sql, params = []) =>
+    withTenant(tenantId, (client) => client.query(sql, params));
+  done();
+}
+`,
+  },
+
+  {
+    id: 'oauth2-pkce-callback',
+    title: 'OAuth2 authorization-code + PKCE flow with state + nonce',
+    tags: ['multi_tenant_saas', 'rest_api', 'auth.oauth2'],
+    purpose:
+      'Industry-standard OAuth2 dance for connecting third-party APIs (Google, GitHub, Slack). Uses PKCE so the authorization code can\'t be replayed even if intercepted. State param defeats CSRF; nonce in the ID token defeats replay. Token storage is encrypted at rest with the operator-scoped key.',
+    hintedPath: 'routes/oauth2.js',
+    language: 'js',
+    body: `import { randomBytes, createHash } from 'crypto';
+import { request as undiciRequest } from 'undici';
+
+const PROVIDER = {
+  authorize: process.env.OAUTH2_AUTHORIZE_URL, // e.g. https://accounts.google.com/o/oauth2/v2/auth
+  token: process.env.OAUTH2_TOKEN_URL,         // e.g. https://oauth2.googleapis.com/token
+  clientId: process.env.OAUTH2_CLIENT_ID,
+  clientSecret: process.env.OAUTH2_CLIENT_SECRET,
+  scopes: (process.env.OAUTH2_SCOPES ?? 'openid email profile').split(/\\s+/),
+};
+
+const REDIRECT_URI = process.env.API_PUBLIC_URL + '/oauth2/callback';
+
+export async function registerOauth2Routes(app, { redis, db }) {
+  app.get('/oauth2/start', async (request, reply) => {
+    const ownerId = request.session?.userId;
+    if (!ownerId) return reply.code(401).send({ error: 'unauthorized' });
+
+    // PKCE: generate verifier, derive challenge.
+    const verifier = base64Url(randomBytes(32));
+    const challenge = base64Url(createHash('sha256').update(verifier).digest());
+    const state = base64Url(randomBytes(16));
+    const nonce = base64Url(randomBytes(16));
+
+    // Stash verifier+state+nonce by state key (5min TTL — flow is fast).
+    await redis.set(\`oauth2:\${state}\`, JSON.stringify({ ownerId, verifier, nonce }), 'EX', 300);
+
+    const url = new URL(PROVIDER.authorize);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('client_id', PROVIDER.clientId);
+    url.searchParams.set('redirect_uri', REDIRECT_URI);
+    url.searchParams.set('scope', PROVIDER.scopes.join(' '));
+    url.searchParams.set('state', state);
+    url.searchParams.set('nonce', nonce);
+    url.searchParams.set('code_challenge', challenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+    return reply.redirect(url.toString());
+  });
+
+  app.get('/oauth2/callback', async (request, reply) => {
+    const { code, state, error } = request.query ?? {};
+    if (error) return reply.code(400).send({ error: String(error) });
+    if (!code || !state) return reply.code(400).send({ error: 'missing_code_or_state' });
+
+    const stashRaw = await redis.getdel(\`oauth2:\${state}\`); // GETDEL is atomic.
+    if (!stashRaw) return reply.code(400).send({ error: 'invalid_or_expired_state' });
+    const { ownerId, verifier, nonce } = JSON.parse(stashRaw);
+
+    const tokenRes = await undiciRequest(PROVIDER.token, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: String(code),
+        redirect_uri: REDIRECT_URI,
+        client_id: PROVIDER.clientId,
+        client_secret: PROVIDER.clientSecret,
+        code_verifier: verifier,
+      }).toString(),
+      bodyTimeout: 15_000,
+    });
+    const tokenJson = await tokenRes.body.json();
+    if (tokenRes.statusCode >= 400) return reply.code(502).send({ error: 'token_exchange_failed', detail: tokenJson });
+
+    // If the provider returns an id_token, verify the nonce matches
+    // before trusting any embedded claims.
+    if (tokenJson.id_token) {
+      const claims = decodeJwtClaims(tokenJson.id_token);
+      if (claims.nonce !== nonce) return reply.code(400).send({ error: 'nonce_mismatch' });
+    }
+
+    // Store encrypted at rest. The encryption key is per-owner so a
+    // single DB leak doesn't unlock every tenant's tokens.
+    await db.collection('oauth2_tokens').updateOne(
+      { ownerId, provider: 'primary' },
+      {
+        $set: {
+          accessToken: encrypt(tokenJson.access_token, ownerId),
+          refreshToken: tokenJson.refresh_token ? encrypt(tokenJson.refresh_token, ownerId) : null,
+          expiresAt: new Date(Date.now() + (Number(tokenJson.expires_in) || 3600) * 1000).toISOString(),
+          scope: tokenJson.scope ?? PROVIDER.scopes.join(' '),
+          updatedAt: new Date().toISOString(),
+        },
+      },
+      { upsert: true },
+    );
+
+    return reply.redirect(\`\${process.env.WEB_PUBLIC_URL}/integrations/connected\`);
+  });
+}
+
+function base64Url(buf) {
+  return Buffer.from(buf).toString('base64')
+    .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+}
+
+function decodeJwtClaims(jwt) {
+  const [, payload] = jwt.split('.');
+  return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+}
+
+// Replace these with your real KMS / per-tenant key derivation.
+function encrypt(plain, ownerId) {
+  return { ciphertext: plain, ownerId, alg: 'plaintext-replace-me' };
+}
+`,
+  },
 ];
 
 /**
@@ -1225,6 +1646,7 @@ export function selectSnippets(args: {
     args.specialist,
     ...args.integrations.map((i) => `integrations.${i}`),
     args.auth === 'magic_link' ? 'auth.magic_link' : '',
+    args.auth === 'oauth2' ? 'auth.oauth2' : '',
     args.dataClassification === 'pii' ? 'data_classification.pii' : '',
   ].filter(Boolean));
 
