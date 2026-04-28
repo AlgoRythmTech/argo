@@ -3,6 +3,8 @@ import type { FastifyInstance } from 'fastify';
 import {
   runAutoFixLoop,
   runQualityGate,
+  analyzeFileImpact,
+  renderImpactAsPromptSection,
   type AutoFixCycleEvent,
 } from '@argo/build-engine';
 import {
@@ -152,11 +154,21 @@ export async function registerIterateRoutes(app: FastifyInstance) {
       description: parsed.data.instruction,
     });
 
+    // File impact analysis: predict which files the instruction affects.
+    // This dramatically reduces the risk of the AI touching wrong files
+    // (pain point #2 from user research across all competitors).
+    const impacts = analyzeFileImpact(
+      parsed.data.instruction,
+      Array.from(existingFileMap.entries()),
+    );
+    const impactSection = renderImpactAsPromptSection(impacts);
+
     const iterationPrompt = composeIterationPrompt({
       instruction: parsed.data.instruction,
       existingFiles: Array.from(existingFileMap.entries()),
       brief,
       strategy,
+      impactSection,
     });
 
     const bundleVersion = (op.bundleVersion ?? 0) + 1;
@@ -485,6 +497,7 @@ function composeIterationPrompt(args: {
   existingFiles: Array<[string, string]>;
   brief: ProjectBrief | null;
   strategy: 'surgical' | 'rebuild';
+  impactSection?: string;
 }): string {
   const lines: string[] = [];
 
@@ -521,6 +534,10 @@ function composeIterationPrompt(args: {
   lines.push('');
   lines.push(args.instruction);
   lines.push('');
+
+  if (args.impactSection) {
+    lines.push(args.impactSection);
+  }
 
   if (args.brief) {
     lines.push('## Original brief (for context)');

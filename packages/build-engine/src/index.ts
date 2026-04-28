@@ -22,3 +22,4 @@ export * from './test-suite-generator.js';
 export * from './security-scanner.js';
 export * from './parallel-build.js';
 export * from './verifier-agent.js';
+export * from './file-impact-analyzer.js';
