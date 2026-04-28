@@ -45,6 +45,7 @@ import { registerUsageRoutes } from './routes/usage.js';
 import { registerCreditRoutes } from './routes/credits.js';
 import { registerImageToAppRoutes } from './routes/image-to-app.js';
 import { registerAppTemplateRoutes } from './routes/app-templates.js';
+import { registerStartupLabRoutes } from './routes/startup-lab.js';
 import { registerAuthPlugin } from './plugins/auth-plugin.js';
 import { attachSocketIo } from './realtime/socket.js';
 import { startDigestWorker } from './jobs/digest-worker.js';
@@ -116,6 +117,7 @@ async function main() {
   await registerCreditRoutes(app);
   await registerImageToAppRoutes(app);
   await registerAppTemplateRoutes(app);
+  await registerStartupLabRoutes(app);
 
   // Eager init.
   await getMongo();

@@ -28,6 +28,7 @@ function makeBundle(files: Array<{ path: string; contents: string }>): Operation
 }
 
 describe('security-scanner', () => {
+
   it('produces a report for a simple bundle', () => {
     const bundle = makeBundle([
       { path: 'server.js', contents: 'const app = require("fastify")();\napp.get("/health", () => ({status:"ok"}));\napp.listen({port:3000});' },
@@ -42,6 +43,7 @@ describe('security-scanner', () => {
     expect(Array.isArray(report.findings)).toBe(true);
   });
 
+
   it('detects hardcoded Stripe keys', () => {
     const bundle = makeBundle([
       { path: 'config.js', contents: 'const stripeKey = "sk_live_00000000000000000000";' },
@@ -49,6 +51,7 @@ describe('security-scanner', () => {
     const report = runSecurityScan(bundle);
     expect(report.findings.some((f) => f.category === 'hardcoded_secret')).toBe(true);
   });
+
 
   it('detects multiple issues in one file', () => {
     const bundle = makeBundle([
@@ -59,6 +62,7 @@ describe('security-scanner', () => {
     expect(report.passed).toBe(false);
   });
 
+
   it('calculates risk score', () => {
     const bundle = makeBundle([
       { path: 'clean.js', contents: 'const x = 1 + 2;' },
@@ -67,6 +71,7 @@ describe('security-scanner', () => {
     expect(report.riskScore).toBeGreaterThanOrEqual(0);
     expect(report.riskScore).toBeLessThanOrEqual(100);
   });
+
 
   it('reports finding counts', () => {
     const bundle = makeBundle([
@@ -77,11 +82,20 @@ describe('security-scanner', () => {
     expect(typeof report.counts.critical).toBe('number');
   });
 
+
   it('does not flag env var references as secrets', () => {
     const bundle = makeBundle([
       { path: 'config.js', contents: 'const key = process.env.STRIPE_SECRET_KEY;' },
     ]);
     const report = runSecurityScan(bundle);
     expect(report.findings.filter((f) => f.category === 'hardcoded_secret').length).toBe(0);
+  });
+
+  it('handles empty bundle gracefully', () => {
+    const bundle = makeBundle([]);
+    const report = runSecurityScan(bundle);
+    expect(report).toBeDefined();
+    expect(report.findings.length).toBe(0);
+    expect(report.passed).toBe(true);
   });
 });
