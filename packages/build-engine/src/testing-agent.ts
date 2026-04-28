@@ -116,9 +116,9 @@ export async function runTestingAgent(args: RunTestingAgentArgs): Promise<Testin
     failures.push({ kind: 'missing_required_file', path: 'package.json' });
     return { passed: false, durationMs: Date.now() - started, failures, routesExercised, booted: false };
   }
-  let pkg: { dependencies?: Record<string, string>; type?: string } = {};
+  let _pkg: { dependencies?: Record<string, string>; type?: string } = {};
   try {
-    pkg = JSON.parse(pkgRaw);
+    _pkg = JSON.parse(pkgRaw);
   } catch (err) {
     failures.push({ kind: 'package_json_invalid', reason: String(err).slice(0, 160) });
     return { passed: false, durationMs: Date.now() - started, failures, routesExercised, booted: false };

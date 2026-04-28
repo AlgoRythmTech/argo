@@ -21,7 +21,7 @@ import { cn } from '../lib/utils.js';
 export function DomainManager({ operationId }: { operationId: string }) {
   const [domainList, setDomainList] = useState<CustomDomain[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, _setError] = useState<string | null>(null);
 
   /* add form */
   const [showAdd, setShowAdd] = useState(false);

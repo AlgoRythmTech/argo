@@ -13,10 +13,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  ArrowRight,
   Check,
   CheckCircle2,
-  ChevronRight,
   FileText,
   Loader2,
   MessageCircle,
@@ -25,8 +23,6 @@ import {
   Shield,
   ShieldCheck,
   Sparkles,
-  X,
-  XCircle,
   Zap,
 } from 'lucide-react';
 import { cn } from '../lib/utils.js';
@@ -107,7 +103,7 @@ function getChangesForInstruction(instruction: string): Change[] {
 
 // ── Component ─────────────────────────────────────────────────────────
 
-export function ConversationalIterate({ operationId, operationName, onApplied }: ConversationalIterateProps) {
+export function ConversationalIterate({ operationId: _operationId, operationName, onApplied }: ConversationalIterateProps) {
   const [phase, setPhase] = useState<IteratePhase>({ phase: 'idle' });
   const [input, setInput] = useState('');
   const [history, setHistory] = useState<Array<{ role: 'user' | 'argo'; content: string }>>([]);

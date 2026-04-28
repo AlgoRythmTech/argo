@@ -3,7 +3,6 @@
 // want to build?" and accepting a fuzzy answer, Argo extracts a precise
 // brief through 3-6 click-card questions a la Perplexity.
 
-import { z } from 'zod';
 import { request } from 'undici';
 import { nanoid } from 'nanoid';
 import { ScopingQuestionnaire } from '@argo/shared-types';

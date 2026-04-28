@@ -39,7 +39,6 @@ import { DataBrowser } from './DataBrowser.js';
 import { CodeExport } from './CodeExport.js';
 import { DomainManager } from './DomainManager.js';
 import { ConversationalIterate } from './ConversationalIterate.js';
-import { VersionTimeline } from './VersionTimeline.js';
 import { ErrorBoundary } from './ErrorBoundary.js';
 import { cn } from '../lib/utils.js';
 

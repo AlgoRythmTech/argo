@@ -670,7 +670,7 @@ function analyzeFailurePattern(args: {
   reviewReport?: ReviewReport;
 }): string {
   const lines: string[] = [];
-  const { cycle, qualityReport, verifierReport, securityReport, npmResult, testingReport, reviewReport } = args;
+  const { cycle, qualityReport, verifierReport, securityReport, npmResult, testingReport, reviewReport: _reviewReport } = args;
 
   lines.push(`This is retry cycle ${cycle}. The previous attempt failed. Here is WHY and what to do differently:`);
   lines.push('');

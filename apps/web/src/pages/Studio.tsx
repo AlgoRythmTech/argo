@@ -10,7 +10,6 @@ import {
   Inbox,
   Loader2,
   Mail,
-  MessageCircle,
   Play,
   Rocket,
   Send,
@@ -540,7 +539,7 @@ export function Studio() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pipelineStep, setPipelineStep] = useState(-1);
   const [iterateInput, setIterateInput] = useState('');
-  const [iterateDone, setIterateDone] = useState(false);
+  const [_iterateDone, setIterateDone] = useState(false);
   const [showPhoneField, setShowPhoneField] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const buildTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -902,8 +901,8 @@ export function Studio() {
                 </AnimatePresence>
 
                 {/* Show answered questions as user bubbles */}
-                {Object.entries(state.answers).map(([qId, answer], i) => {
-                  const q = QUESTIONS.find((qq) => qq.id === qId);
+                {Object.entries(state.answers).map(([qId, answer], _i) => {
+                  QUESTIONS.find((qq) => qq.id === qId);
                   return (
                     <ChatBubble key={qId} from="user" delay={0}>
                       {answer}

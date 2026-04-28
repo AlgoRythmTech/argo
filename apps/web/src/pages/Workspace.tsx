@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BarChart3, Bot, ChevronRight, Copy, DollarSign, ExternalLink, LayoutGrid, LogOut, MessageCircle, Plus, Shield, Workflow, Wrench } from 'lucide-react';
+import { BarChart3, Bot, ChevronRight, Copy, DollarSign, ExternalLink, LayoutGrid, LogOut, MessageCircle, Plus, Shield, Wrench } from 'lucide-react';
 import { useArgo } from '../state/store.js';
 import {
   activity,

@@ -10,7 +10,7 @@
  *   4. Results — review the synthesized product and kick off a build
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowRight,
@@ -25,7 +25,6 @@ import {
   Plus,
   Rocket,
   RotateCcw,
-  Search,
   Shield,
   Sparkles,
   Star,

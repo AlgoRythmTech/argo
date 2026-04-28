@@ -816,7 +816,6 @@ function checkFastifyErrorHandler(bundle: OperationBundle): QualityIssue[] {
 
 function checkMongoIndexes(bundle: OperationBundle): QualityIssue[] {
   // Find any file that creates a Mongo collection but never createIndex.
-  const out: QualityIssue[] = [];
   const usesMongo = bundle.files.some((f) => /\bdb\.collection\(/.test(f.contents));
   if (!usesMongo) return [];
   const declaresIndexes = bundle.files.some(

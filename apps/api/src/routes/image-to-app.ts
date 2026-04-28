@@ -1,6 +1,5 @@
 import type { FastifyInstance } from 'fastify';
 import { request } from 'undici';
-import { getPrisma } from '../db/prisma.js';
 import { getMongo } from '../db/mongo.js';
 import { requireSession } from '../plugins/auth-plugin.js';
 import { appendActivity } from '../stores/activity-store.js';

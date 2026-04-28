@@ -2,7 +2,7 @@
 // Renders the WorkflowMap as a list of expandable steps (and substeps).
 // Used in the workspace's left sidebar so the user always sees what Argo
 // is *about* to do, what it just did, and what's awaiting their approval.
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { CheckCircle2, Circle, CircleAlert, CircleDotDashed, CircleX } from 'lucide-react';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { cn } from '../../lib/utils.js';

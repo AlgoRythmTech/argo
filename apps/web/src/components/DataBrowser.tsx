@@ -42,7 +42,7 @@ export function DataBrowser({ operationId }: { operationId: string }) {
   const [filter, setFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [docsLoading, setDocsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, _setError] = useState<string | null>(null);
   const [inspecting, setInspecting] = useState<Record<string, unknown> | null>(null);
 
   /* fetch collections */

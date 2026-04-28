@@ -62,7 +62,7 @@ const PRICING = [
 export function UsageDashboard() {
   const [data, setData] = useState<UsageData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, _setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;

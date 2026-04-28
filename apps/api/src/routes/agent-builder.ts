@@ -1,5 +1,4 @@
 import type { FastifyInstance } from 'fastify';
-import { getPrisma } from '../db/prisma.js';
 import { getMongo } from '../db/mongo.js';
 import { requireSession } from '../plugins/auth-plugin.js';
 import { deployAgent, determineAgentMode, generateSkillFile, SandboxPoolManager, type AgentConfig } from '../services/agent-deployer.js';

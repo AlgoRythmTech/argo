@@ -1,4 +1,3 @@
-import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { tokensMatch } from '@argo/security';
 import { rememberDecision } from '@argo/agent';

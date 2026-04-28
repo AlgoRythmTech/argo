@@ -10,7 +10,6 @@ import { useCallback, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   AlertTriangle,
-  ArrowDown,
   Bell,
   Bot,
   Check,
@@ -18,12 +17,9 @@ import {
   ChevronDown,
   ClipboardList,
   Database,
-  FileText,
   Filter,
-  Globe,
   Loader2,
   Mail,
-  Pen,
   Play,
   Plus,
   Rocket,
@@ -155,7 +151,7 @@ interface SimState {
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
 
-export function WorkflowAutomation({ operationId, initialWorkflow, onSave, onDeploy }: WorkflowAutomationProps) {
+export function WorkflowAutomation({ operationId: _operationId, initialWorkflow, onSave, onDeploy }: WorkflowAutomationProps) {
   const [workflow, setWorkflow] = useState<WorkflowDefinition>(initialWorkflow ?? emptyWorkflow());
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [showAddMenu, setShowAddMenu] = useState(false);

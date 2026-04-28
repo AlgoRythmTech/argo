@@ -203,7 +203,7 @@ const fadeUp = { initial: { opacity: 0, y: 12 }, animate: { opacity: 1, y: 0 }, 
 
 // ── Component ─────────────────────────────────────────────────────────────
 
-export function AgentBuilder({ operationId }: { operationId?: string }) {
+export function AgentBuilder({ operationId: _operationId }: { operationId?: string }) {
   const [config, dispatch] = useReducer(agentReducer, INITIAL_CONFIG);
   const [activeTab, setActiveTab] = useState<BuilderTab>('configure');
   const [deploying, setDeploying] = useState(false);

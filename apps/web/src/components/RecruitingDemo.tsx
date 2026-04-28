@@ -482,7 +482,7 @@ function AIScreeningSection({ onComplete }: { onComplete: () => void }) {
         <AnimatePresence>
           {phase !== 'analyzing' && (
             <motion.div className="space-y-3 mb-8" variants={stagger} initial="initial" animate="animate">
-              {ANALYSIS_ITEMS.slice(0, visibleItems).map((item, i) => (
+              {ANALYSIS_ITEMS.slice(0, visibleItems).map((item, _i) => (
                 <motion.div
                   key={item.label}
                   className="flex items-start gap-3 rounded-lg border border-argo-border bg-argo-bg px-4 py-3"
@@ -985,7 +985,7 @@ function RegressionSection({ onComplete }: { onComplete: () => void }) {
           </motion.p>
           <p className="text-argo-textSecondary mb-1">Running {BASELINE_TESTS.length} baseline tests...</p>
 
-          {BASELINE_TESTS.slice(0, passedCount).map((test, i) => (
+          {BASELINE_TESTS.slice(0, passedCount).map((test, _i) => (
             <motion.div
               key={test}
               className="flex items-center gap-2"

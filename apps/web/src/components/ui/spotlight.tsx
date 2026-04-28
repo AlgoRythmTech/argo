@@ -1,5 +1,4 @@
 // argo:upstream aceternity@spotlight
-import React from 'react';
 import { cn } from '../../lib/utils.js';
 
 type SpotlightProps = { className?: string; fill?: string };
