@@ -11,5 +11,6 @@ export * from './browser-tool.js';
 export * from './tool-call-parser.js';
 export * from './twentyfirst-client.js';
 export * from './sandbox-exec-tool.js';
+export * from './firecrawl-tool.js';
 export { runToolCall } from './run-tool-call.js';
 export type { ToolExecutionResult } from './run-tool-call.js';

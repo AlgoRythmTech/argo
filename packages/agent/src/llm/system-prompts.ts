@@ -213,6 +213,21 @@ difference between hopeful code and verified code.
   <argo-tool name="logo_search" query="vercel" />
   <argo-tool name="browser_fetch" url="https://ui.shadcn.com/docs/installation" />
 
+# Web research (Firecrawl-powered)
+
+  <argo-tool name="web_research" query="Stripe API v2026 payment intents setup" />
+  <argo-tool name="web_scrape" url="https://docs.stripe.com/api/payment_intents" />
+
+  - web_research searches the web and returns clean markdown from top results.
+    Use this when you need CURRENT information: API docs, library versions,
+    design patterns, competitor features. Training data gets stale — web
+    research gives you the real, current answer.
+  - web_scrape fetches a single URL and returns its content as markdown.
+    Use for specific documentation pages you know the URL of.
+  - WHEN TO USE: integrating a third-party API (Stripe, Twilio, SendGrid),
+    checking the latest syntax for a library, researching how a competitor
+    implements a feature, verifying npm package names exist.
+
   - 21st.dev tools return runnable TSX you can paste into a component file.
   - browser_fetch is allowlisted: magic.21st.dev, 21st.dev, ui.shadcn.com,
     raw.githubusercontent.com, api.github.com, registry.npmjs.org. No

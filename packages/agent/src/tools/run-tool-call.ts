@@ -11,6 +11,11 @@ import {
   renderSandboxExecAsPromptSection,
   SANDBOX_EXEC_ALLOWED_BINARIES,
 } from './sandbox-exec-tool.js';
+import {
+  webResearch,
+  webScrape,
+  renderWebResearchAsPromptSection,
+} from './firecrawl-tool.js';
 import { TwentyFirstClient } from './twentyfirst-client.js';
 import type { ToolCall } from './tool-call-parser.js';
 
@@ -121,13 +126,38 @@ export async function runToolCall(
       };
     }
 
+    case 'web_research': {
+      const query = call.attrs.query ?? '';
+      if (!query) return badRequest('web_research', 'missing query attribute');
+      const limit = call.attrs.limit ? parseInt(call.attrs.limit, 10) : 5;
+      const res = await webResearch(query, limit);
+      return {
+        ok: res.ok,
+        label: `web_research:${query}`,
+        rendered: renderWebResearchAsPromptSection(res),
+      };
+    }
+
+    case 'web_scrape': {
+      const url = call.attrs.url ?? '';
+      if (!url) return badRequest('web_scrape', 'missing url attribute');
+      const res = await webScrape(url);
+      return {
+        ok: res.ok,
+        label: `web_scrape:${url}`,
+        rendered: res.ok
+          ? `# Tool result: web_scrape\nURL: ${url}\n\n${res.content}`
+          : `# Tool result: web_scrape (failed)\nURL: ${url}\nError: ${res.error}`,
+      };
+    }
+
     default:
       return {
         ok: false,
         label: `unknown:${call.name}`,
         rendered: [
           `# Tool error: unknown tool "${call.name}"`,
-          'Supported tools: fetch_21st_component, create_21st_component, logo_search, browser_fetch, sandbox_exec.',
+          'Supported tools: fetch_21st_component, create_21st_component, logo_search, browser_fetch, sandbox_exec, web_research, web_scrape.',
           `Allowed browser_fetch hosts: ${BROWSER_TOOL_ALLOWLIST.join(', ')}.`,
           `Allowed sandbox_exec binaries: ${SANDBOX_EXEC_ALLOWED_BINARIES.join(', ')}.`,
         ].join('\n'),
