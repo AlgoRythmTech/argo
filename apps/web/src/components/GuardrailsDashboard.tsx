@@ -55,92 +55,157 @@ type ChangedFile = {
 
 type ApprovalEntry = { actor: string; action: string; timestamp: string };
 
+/** Matches the backend GET /api/operations/:id/guardrails response shape */
 type GuardrailsData = {
-  tests: TestResult[];
-  vulnerabilities: VulnerabilityCategory[];
-  qualityChecks: QualityCheck[];
   safetyScore: number;
-  changedFiles: ChangedFile[];
-  approvals: ApprovalEntry[];
+  security: {
+    categoriesScanned: number;
+    passed: number;
+    warnings: number;
+    failed: number;
+    results: Array<{ category: string; label: string; status: string; severity: string | null; count: number }>;
+  };
+  qualityGate: {
+    totalChecks: number;
+    passed: number;
+    categories: Array<{
+      category: string;
+      label: string;
+      checks: Array<{ id: string; label: string; status: string; message: string | null }>;
+      passCount: number;
+    }>;
+  };
+  tests: {
+    totalTests: number;
+    passed: number;
+    failed: number;
+    skipped: number;
+    suites: Array<{ name: string; total: number; passed: number; failed: number; durationMs: number }>;
+  };
+  regressions: Array<{
+    bundleVersion: number;
+    testsRun: number;
+    testsPassed: number;
+    regressionDetected: boolean;
+    createdAt: string;
+  }>;
+  approvalHistory: Array<{ kind: string; message: string; occurredAt: string }>;
+  changeImpact: { filesChanged: number; testsCoveringChanges: number; riskLevel: string };
 };
+
+// Adapters to convert backend shape to the display types used in rendering
+function adaptTests(data: GuardrailsData): TestResult[] {
+  if (data.tests.suites.length > 0) {
+    return data.tests.suites.flatMap((s) => [
+      { name: `${s.name} (${s.passed}/${s.total} passed)`, passed: s.failed === 0, durationMs: s.durationMs },
+    ]);
+  }
+  return [{ name: `${data.tests.passed}/${data.tests.totalTests} tests passed`, passed: data.tests.failed === 0, durationMs: 0 }];
+}
+
+function adaptVulnerabilities(data: GuardrailsData): VulnerabilityCategory[] {
+  return data.security.results.map((r) => ({
+    name: r.label,
+    passed: r.status === 'pass',
+    severity: (r.severity ?? 'low') as VulnerabilityCategory['severity'],
+  }));
+}
+
+function adaptQualityChecks(data: GuardrailsData): QualityCheck[] {
+  return data.qualityGate.categories.flatMap((cat) =>
+    cat.checks.map((c) => ({
+      name: c.label,
+      category: cat.category.replace(/_/g, '-') as QualityCheck['category'],
+      passed: c.status === 'pass',
+      score: c.status === 'pass' ? 100 : 0,
+    })),
+  );
+}
+
+function adaptChangedFiles(data: GuardrailsData): ChangedFile[] {
+  return data.regressions.slice(0, 5).map((r) => ({
+    path: `v${r.bundleVersion}`,
+    additions: r.testsPassed,
+    deletions: r.testsRun - r.testsPassed,
+    coveredByTests: [],
+    risk: r.regressionDetected ? 'high' as const : 'low' as const,
+  }));
+}
+
+function adaptApprovals(data: GuardrailsData): ApprovalEntry[] {
+  return data.approvalHistory.map((a) => ({
+    actor: 'Operator',
+    action: a.kind.replace(/_/g, ' '),
+    timestamp: a.occurredAt,
+  }));
+}
 
 /* -------------------------------------------------------------------------- */
 /*  Sample data (used when the endpoint is not yet wired)                     */
 /* -------------------------------------------------------------------------- */
 
 const SAMPLE_DATA: GuardrailsData = {
-  tests: [
-    { name: 'renders landing page without crash', passed: true, durationMs: 42 },
-    { name: 'form validation rejects empty email', passed: true, durationMs: 18 },
-    { name: 'API client retries on 5xx', passed: true, durationMs: 134 },
-    { name: 'auth redirect for unauthenticated user', passed: true, durationMs: 87 },
-    { name: 'dark mode toggle persists preference', passed: true, durationMs: 56 },
-    { name: 'webhook payload signature verification', passed: true, durationMs: 23 },
-    { name: 'rate limiter blocks after threshold', passed: true, durationMs: 201 },
-    { name: 'image upload validates file type', passed: false, durationMs: 95 },
-    { name: 'SSR hydration matches client render', passed: true, durationMs: 312 },
-    { name: 'CORS headers present on API responses', passed: true, durationMs: 14 },
-    { name: 'database connection pool cleanup', passed: true, durationMs: 67 },
-    { name: 'CSV export includes all columns', passed: true, durationMs: 148 },
-  ],
-  vulnerabilities: [
-    { name: 'SQL Injection', passed: true, severity: 'critical' },
-    { name: 'Cross-Site Scripting (XSS)', passed: true, severity: 'critical' },
-    { name: 'Cross-Site Request Forgery', passed: true, severity: 'high' },
-    { name: 'Insecure Deserialization', passed: true, severity: 'high' },
-    { name: 'Broken Authentication', passed: true, severity: 'critical' },
-    { name: 'Sensitive Data Exposure', passed: true, severity: 'high' },
-    { name: 'XML External Entities', passed: true, severity: 'medium' },
-    { name: 'Broken Access Control', passed: true, severity: 'critical' },
-    { name: 'Security Misconfiguration', passed: false, severity: 'medium' },
-    { name: 'Insecure Dependencies', passed: true, severity: 'high' },
-    { name: 'Insufficient Logging', passed: true, severity: 'low' },
-    { name: 'Server-Side Request Forgery', passed: true, severity: 'high' },
-    { name: 'Path Traversal', passed: true, severity: 'medium' },
-    { name: 'Prototype Pollution', passed: true, severity: 'medium' },
-    { name: 'Regex Denial of Service', passed: true, severity: 'low' },
-  ],
-  qualityChecks: Array.from({ length: 49 }, (_, i) => {
-    const categories = [
-      'code-quality', 'performance', 'accessibility', 'security', 'best-practices',
-    ] as const;
-    const names = [
-      'No unused variables', 'No any types', 'Consistent naming', 'Max file length',
-      'No console.log in prod', 'Tree-shakeable exports', 'Lighthouse perf > 90',
-      'First contentful paint < 1.8s', 'Bundle size < 250KB', 'No layout shifts',
-      'Image optimization', 'Lazy-loaded routes', 'ARIA labels present',
-      'Color contrast ratio', 'Keyboard navigable', 'Focus indicators',
-      'Screen reader compatible', 'Semantic HTML', 'CSP headers configured',
-      'HTTPS enforced', 'No eval()', 'Dependency audit clean', 'Rate limiting enabled',
-      'Input sanitization', 'ESLint zero warnings', 'Prettier formatted',
-      'No circular deps', 'Test coverage > 80%', 'No TODO in prod code',
-      'Error boundaries present', 'Graceful degradation', 'No hardcoded secrets',
-      'API versioning', 'Proper HTTP status codes', 'Request validation',
-      'Response compression', 'Cache headers set', 'No memory leaks',
-      'Web vitals passing', 'Mobile responsive', 'Cross-browser tested',
-      'No deprecated APIs', 'Type safety 100%', 'No implicit any',
-      'Strict null checks', 'Exhaustive switch cases', 'No floating promises',
-      'Error logging configured', 'Health check endpoint',
-    ];
-    return {
-      name: names[i] ?? `Quality check #${i + 1}`,
-      category: categories[i % categories.length] as QualityCheck['category'],
-      passed: i !== 8 && i !== 28,
-      score: i === 8 ? 62 : i === 28 ? 45 : 85 + Math.floor(Math.random() * 16),
-    };
-  }),
   safetyScore: 94,
-  changedFiles: [
-    { path: 'src/components/Landing.tsx', additions: 24, deletions: 8, coveredByTests: ['renders landing page without crash'], risk: 'low' },
-    { path: 'src/api/client.ts', additions: 12, deletions: 3, coveredByTests: ['API client retries on 5xx', 'CORS headers present on API responses'], risk: 'medium' },
-    { path: 'src/hooks/useAuth.ts', additions: 45, deletions: 22, coveredByTests: ['auth redirect for unauthenticated user'], risk: 'high' },
-    { path: 'src/utils/upload.ts', additions: 18, deletions: 0, coveredByTests: [], risk: 'high' },
+  security: {
+    categoriesScanned: 15,
+    passed: 14,
+    warnings: 1,
+    failed: 0,
+    results: [
+      { category: 'sql_injection', label: 'SQL Injection', status: 'pass', severity: null, count: 0 },
+      { category: 'xss', label: 'Cross-Site Scripting', status: 'pass', severity: null, count: 0 },
+      { category: 'prototype_pollution', label: 'Prototype Pollution', status: 'pass', severity: null, count: 0 },
+      { category: 'path_traversal', label: 'Path Traversal', status: 'pass', severity: null, count: 0 },
+      { category: 'command_injection', label: 'Command Injection', status: 'pass', severity: null, count: 0 },
+      { category: 'ssrf', label: 'Server-Side Request Forgery', status: 'pass', severity: null, count: 0 },
+      { category: 'open_redirect', label: 'Open Redirect', status: 'pass', severity: null, count: 0 },
+      { category: 'xxe', label: 'XML External Entities', status: 'pass', severity: null, count: 0 },
+      { category: 'insecure_deserialization', label: 'Insecure Deserialization', status: 'pass', severity: null, count: 0 },
+      { category: 'weak_crypto', label: 'Weak Cryptography', status: 'pass', severity: null, count: 0 },
+      { category: 'hardcoded_secrets', label: 'Hardcoded Secrets', status: 'pass', severity: null, count: 0 },
+      { category: 'missing_auth', label: 'Missing Authentication', status: 'pass', severity: null, count: 0 },
+      { category: 'cors_misconfiguration', label: 'CORS Misconfiguration', status: 'warn', severity: 'medium', count: 1 },
+      { category: 'rate_limit_bypass', label: 'Rate Limit Bypass', status: 'pass', severity: null, count: 0 },
+      { category: 'information_disclosure', label: 'Information Disclosure', status: 'pass', severity: null, count: 0 },
+    ],
+  },
+  qualityGate: {
+    totalChecks: 49,
+    passed: 48,
+    categories: [
+      { category: 'code_quality', label: 'Code Quality', checks: [
+        { id: 'no_console_log', label: 'No Console Log', status: 'pass', message: null },
+        { id: 'no_eval', label: 'No Eval', status: 'pass', message: null },
+        { id: 'imports_resolve', label: 'Imports Resolve', status: 'pass', message: null },
+      ], passCount: 3 },
+      { category: 'security', label: 'Security', checks: [
+        { id: 'no_inlined_secrets', label: 'No Inlined Secrets', status: 'pass', message: null },
+        { id: 'escape_for_email', label: 'Escape For Email', status: 'pass', message: null },
+      ], passCount: 2 },
+      { category: 'infrastructure', label: 'Infrastructure', checks: [
+        { id: 'health_route', label: 'Health Route Present', status: 'pass', message: null },
+        { id: 'helmet_registered', label: 'Helmet Registered', status: 'pass', message: null },
+      ], passCount: 2 },
+    ],
+  },
+  tests: {
+    totalTests: 12, passed: 11, failed: 1, skipped: 0,
+    suites: [
+      { name: 'Health & Routing', total: 4, passed: 4, failed: 0, durationMs: 142 },
+      { name: 'Form Validation', total: 3, passed: 3, failed: 0, durationMs: 87 },
+      { name: 'Email Templates', total: 3, passed: 3, failed: 0, durationMs: 56 },
+      { name: 'Auth Flow', total: 2, passed: 1, failed: 1, durationMs: 95 },
+    ],
+  },
+  regressions: [
+    { bundleVersion: 3, testsRun: 12, testsPassed: 12, regressionDetected: false, createdAt: new Date().toISOString() },
+    { bundleVersion: 2, testsRun: 10, testsPassed: 10, regressionDetected: false, createdAt: new Date(Date.now() - 86400000).toISOString() },
   ],
-  approvals: [
-    { actor: 'Argo CI', action: 'Auto-approved: all regression tests passing', timestamp: '2026-04-28T14:22:11Z' },
-    { actor: 'Security Bot', action: 'Approved: no critical vulnerabilities', timestamp: '2026-04-28T14:22:14Z' },
-    { actor: 'Quality Gate', action: 'Approved: 47/49 checks passing (96%)', timestamp: '2026-04-28T14:22:16Z' },
+  approvalHistory: [
+    { kind: 'deploy_approved', message: 'Deployed v3', occurredAt: new Date().toISOString() },
+    { kind: 'approval_granted', message: 'Approved candidate email template', occurredAt: new Date(Date.now() - 3600000).toISOString() },
   ],
+  changeImpact: { filesChanged: 3, testsCoveringChanges: 8, riskLevel: 'low' },
 };
 
 /* -------------------------------------------------------------------------- */
@@ -293,18 +358,25 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
     return () => { cancelled = true; };
   }, [operationId]);
 
+  /* Convert backend shape to display arrays */
+  const displayTests = useMemo(() => data ? adaptTests(data) : [], [data]);
+  const displayVulns = useMemo(() => data ? adaptVulnerabilities(data) : [], [data]);
+  const displayQuality = useMemo(() => data ? adaptQualityChecks(data) : [], [data]);
+  const displayChanges = useMemo(() => data ? adaptChangedFiles(data) : [], [data]);
+  const displayApprovals = useMemo(() => data ? adaptApprovals(data) : [], [data]);
+
   /* Derived stats */
   const stats = useMemo(() => {
     if (!data) return null;
-    const testsPassed = data.tests.filter((t) => t.passed).length;
-    const vulnsPassed = data.vulnerabilities.filter((v) => v.passed).length;
-    const qualityPassed = data.qualityChecks.filter((q) => q.passed).length;
-    const qualityByCategory = data.qualityChecks.reduce<Record<string, QualityCheck[]>>((acc, q) => {
+    const testsPassed = displayTests.filter((t) => t.passed).length;
+    const vulnsPassed = displayVulns.filter((v) => v.passed).length;
+    const qualityPassed = displayQuality.filter((q) => q.passed).length;
+    const qualityByCategory = displayQuality.reduce<Record<string, QualityCheck[]>>((acc, q) => {
       (acc[q.category] ??= []).push(q);
       return acc;
     }, {});
     return { testsPassed, vulnsPassed, qualityPassed, qualityByCategory };
-  }, [data]);
+  }, [data, displayTests, displayVulns, displayQuality]);
 
   /* ---------- Loading / empty states ---------- */
 
@@ -360,9 +432,9 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
                   : 'Critical issues found. Deployment is blocked until resolved.'}
             </p>
             <div className="flex flex-wrap justify-center sm:justify-start gap-3 pt-1">
-              <MiniStat label="Tests" value={`${stats.testsPassed}/${data.tests.length}`} ok={stats.testsPassed === data.tests.length} />
-              <MiniStat label="Vulns" value={`${stats.vulnsPassed}/${data.vulnerabilities.length}`} ok={stats.vulnsPassed === data.vulnerabilities.length} />
-              <MiniStat label="Quality" value={`${stats.qualityPassed}/${data.qualityChecks.length}`} ok={stats.qualityPassed === data.qualityChecks.length} />
+              <MiniStat label="Tests" value={`${stats.testsPassed}/${displayTests.length}`} ok={stats.testsPassed === displayTests.length} />
+              <MiniStat label="Vulns" value={`${stats.vulnsPassed}/${displayVulns.length}`} ok={stats.vulnsPassed === displayVulns.length} />
+              <MiniStat label="Quality" value={`${stats.qualityPassed}/${displayQuality.length}`} ok={stats.qualityPassed === displayQuality.length} />
             </div>
           </div>
         </motion.div>
@@ -370,7 +442,7 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
         {/* ---- Regression Tests ---- */}
         <Section delay={0.1}>
           <SectionHeader icon={Bug} title="Regression Tests"
-            badge={<StatusBadge passed={stats.testsPassed === data.tests.length} label={`${stats.testsPassed}/${data.tests.length}`} />}
+            badge={<StatusBadge passed={stats.testsPassed === displayTests.length} label={`${stats.testsPassed}/${displayTests.length}`} />}
             expanded={!!expandedSections.tests} onToggle={() => toggle('tests')} />
           <AnimatePresence>
             {expandedSections.tests && (
@@ -382,10 +454,10 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
                   <div className="h-2 rounded-full bg-argo-border/40 overflow-hidden mb-3">
                     <motion.div className="h-full rounded-full bg-argo-green"
                       initial={{ width: 0 }}
-                      animate={{ width: `${(stats.testsPassed / data.tests.length) * 100}%` }}
+                      animate={{ width: `${(stats.testsPassed / displayTests.length) * 100}%` }}
                       transition={{ duration: 1, ease: 'easeOut', delay: 0.3 }} />
                   </div>
-                  {data.tests.map((t) => (
+                  {displayTests.map((t) => (
                     <div key={t.name} className="flex items-center gap-2 text-xs py-1 px-2 rounded hover:bg-white/[0.02]">
                       {t.passed
                         ? <CheckCircle2 className="h-3.5 w-3.5 text-argo-green flex-shrink-0" />
@@ -403,8 +475,8 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
         {/* ---- Security Scan ---- */}
         <Section delay={0.2}>
           <SectionHeader icon={Lock} title="Security Scan"
-            badge={<StatusBadge passed={stats.vulnsPassed === data.vulnerabilities.length}
-              label={`${stats.vulnsPassed}/${data.vulnerabilities.length}`} />}
+            badge={<StatusBadge passed={stats.vulnsPassed === displayVulns.length}
+              label={`${stats.vulnsPassed}/${displayVulns.length}`} />}
             expanded={!!expandedSections.security} onToggle={() => toggle('security')} />
           <AnimatePresence>
             {expandedSections.security && (
@@ -412,7 +484,7 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
                 exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.25 }}
                 className="overflow-hidden">
                 <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                  {data.vulnerabilities.map((v) => (
+                  {displayVulns.map((v) => (
                     <div key={v.name} className="flex items-center gap-2 text-xs py-1.5 px-2 rounded hover:bg-white/[0.02]">
                       {v.passed
                         ? <CheckCircle2 className="h-3.5 w-3.5 text-argo-green flex-shrink-0" />
@@ -430,8 +502,8 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
         {/* ---- Quality Gate ---- */}
         <Section delay={0.3}>
           <SectionHeader icon={ShieldCheck} title="Quality Gate (49 checks)"
-            badge={<StatusBadge passed={stats.qualityPassed === data.qualityChecks.length}
-              label={`${stats.qualityPassed}/${data.qualityChecks.length}`} />}
+            badge={<StatusBadge passed={stats.qualityPassed === displayQuality.length}
+              label={`${stats.qualityPassed}/${displayQuality.length}`} />}
             expanded={!!expandedSections.quality} onToggle={() => toggle('quality')} />
           <AnimatePresence>
             {expandedSections.quality && (
@@ -480,7 +552,7 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
         {/* ---- Change Impact Analysis ---- */}
         <Section delay={0.4}>
           <SectionHeader icon={FileCode2} title="Change Impact Analysis"
-            badge={<span className="text-[11px] text-argo-textSecondary">{data.changedFiles.length} files</span>}
+            badge={<span className="text-[11px] text-argo-textSecondary">{displayChanges.length} files</span>}
             expanded={!!expandedSections.impact} onToggle={() => toggle('impact')} />
           <AnimatePresence>
             {expandedSections.impact && (
@@ -488,7 +560,7 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
                 exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.25 }}
                 className="overflow-hidden">
                 <div className="px-4 pb-4 space-y-2">
-                  {data.changedFiles.map((f) => (
+                  {displayChanges.map((f) => (
                     <div key={f.path} className="rounded-lg border border-argo-border/50 bg-white/[0.01] p-3 space-y-1.5">
                       <div className="flex items-center gap-2">
                         <FileCode2 className="h-3.5 w-3.5 text-argo-accent flex-shrink-0" />
@@ -523,7 +595,7 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
         {/* ---- Approval History ---- */}
         <Section delay={0.5}>
           <SectionHeader icon={Fingerprint} title="Approval History"
-            badge={<span className="text-[11px] text-argo-textSecondary">{data.approvals.length} entries</span>}
+            badge={<span className="text-[11px] text-argo-textSecondary">{displayApprovals.length} entries</span>}
             expanded={!!expandedSections.approvals} onToggle={() => toggle('approvals')} />
           <AnimatePresence>
             {expandedSections.approvals && (
@@ -532,7 +604,7 @@ export function GuardrailsDashboard({ operationId }: { operationId: string }) {
                 className="overflow-hidden">
                 <div className="px-4 pb-4">
                   <div className="relative border-l-2 border-argo-border/40 ml-3 space-y-4 py-1">
-                    {data.approvals.map((a, i) => (
+                    {displayApprovals.map((a, i) => (
                       <motion.div key={i}
                         initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}
                         transition={{ delay: 0.6 + i * 0.15 }}

@@ -9,7 +9,7 @@
  *   - full (panel): hero card with stat breakdowns, loop detections, refunds
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   AlertTriangle,
@@ -27,24 +27,37 @@ interface CreditShieldProps {
   compact?: boolean;
 }
 
+/** Matches backend GET /api/credits/summary response */
 interface CreditSummary {
-  totalSpent: number;
-  autoRefunded: number;
-  netCharged: number;
+  totalSpentUsd: number;
+  totalRefundedUsd: number;
+  netChargedUsd: number;
   loopDetections: number;
   platformErrorRefunds: number;
-  periodLabel: string;
+  period: { start: string; end: string };
+}
+
+/** Helper to adapt backend names to display names */
+function displaySummary(d: CreditSummary) {
+  return {
+    totalSpent: d.totalSpentUsd,
+    autoRefunded: d.totalRefundedUsd,
+    netCharged: d.netChargedUsd,
+    loopDetections: d.loopDetections,
+    platformErrorRefunds: d.platformErrorRefunds,
+    periodLabel: `${new Date(d.period.start).toLocaleDateString()} — ${new Date(d.period.end).toLocaleDateString()}`,
+  };
 }
 
 // ── Fallback data ──────────────────────────────────────────────────────
 
 const SAMPLE_DATA: CreditSummary = {
-  totalSpent: 0,
-  autoRefunded: 0,
-  netCharged: 0,
+  totalSpentUsd: 0,
+  totalRefundedUsd: 0,
+  netChargedUsd: 0,
   loopDetections: 0,
   platformErrorRefunds: 0,
-  periodLabel: 'This month',
+  period: { start: new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString(), end: new Date().toISOString() },
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -56,7 +69,8 @@ function formatUsd(cents: number): string {
 // ── Component ──────────────────────────────────────────────────────────
 
 export function CreditShield({ compact }: CreditShieldProps) {
-  const [data, setData] = useState<CreditSummary>(SAMPLE_DATA);
+  const [rawData, setRawData] = useState<CreditSummary>(SAMPLE_DATA);
+  const data = useMemo(() => displaySummary(rawData), [rawData]);
   const [loading, setLoading] = useState(true);
   const [tooltipOpen, setTooltipOpen] = useState(false);
 
@@ -66,13 +80,13 @@ export function CreditShield({ compact }: CreditShieldProps) {
       .get<CreditSummary>('/api/credits/summary')
       .then((res) => {
         if (!cancelled) {
-          setData(res);
+          setRawData(res);
           setLoading(false);
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setData(SAMPLE_DATA);
+          setRawData(SAMPLE_DATA);
           setLoading(false);
         }
       });
