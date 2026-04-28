@@ -616,19 +616,21 @@ export function createLLMClient() {
         };
       }
 
-      // OpenAI path
+      // OpenAI path — GPT-5.5 uses max_completion_tokens and no temperature
+      const isGpt55 = model.startsWith('gpt-5.5');
+      const openaiBody = {
+        model,
+        max_completion_tokens: maxTokens,
+        messages,
+        ...(isGpt55 ? {} : { temperature }),
+      };
       const res = await request('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
           'authorization': \`Bearer \${OPENAI_KEY}\`,
           'content-type': 'application/json',
         },
-        body: JSON.stringify({
-          model,
-          max_tokens: maxTokens,
-          temperature,
-          messages,
-        }),
+        body: JSON.stringify(openaiBody),
       });
       const data = await res.body.json();
       return {
