@@ -24,6 +24,7 @@
     "lint": "echo 'lint: nothing to do'"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
     "@argo/security": "workspace:*",
     "@argo/shared-types": "workspace:*",
     "nanoid": "^5.0.7",

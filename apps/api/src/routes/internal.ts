@@ -7,6 +7,7 @@ import { requireInternalKey } from '../plugins/internal-auth.js';
 import { broadcastToOwner } from '../realtime/socket.js';
 import { appendActivity } from '../stores/activity-store.js';
 import { logger } from '../logger.js';
+import { dispatchWebhook } from '../services/webhook-dispatcher.js';
 
 const SubmissionBody = z.object({
   operationId: z.string(),
@@ -80,6 +81,8 @@ export async function registerInternalRoutes(app: FastifyInstance) {
       message: `New submission (${parsed.data.submissionId.slice(-8)}).`,
     });
     broadcastToOwner(op.ownerId, { type: 'activity', payload: activity });
+
+    dispatchWebhook(op.id, 'submission.received', parsed.data).catch(() => undefined);
 
     return reply.send({ ok: true });
   });

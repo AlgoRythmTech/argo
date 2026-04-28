@@ -105,8 +105,8 @@ const HOW_IT_WORKS = [
   },
   {
     n: '03', icon: Eye, title: 'Preview',
-    body: 'A 33-check quality gate runs in milliseconds. Anything failing re-prompts the model with structured errors. Up to 3 cycles.',
-    detail: 'No console.log · no localhost · no inlined secrets · SIGTERM · helmet · body limits.',
+    body: 'A 49-check quality gate + 15-category security scanner + auto-generated regression tests run before every deploy. Changes that break existing features are automatically blocked.',
+    detail: '49 quality checks · 15 security scan categories · auto-generated test suite · regression guard · npm hallucination detection.',
   },
   {
     n: '04', icon: Inbox, title: 'Operate from email',
@@ -125,47 +125,57 @@ const ARCHITECTURE_NODES = [
 ] as const;
 
 const COMPARISON_ROWS = [
-  { feature: 'Built for non-developer operators (no IDE, no terminal)', argo: true, kis: false, replit: false, lovable: 'partial' },
-  { feature: 'One-sentence brief → click-card scoping (no prompt engineering)', argo: true, kis: false, replit: false, lovable: false },
-  { feature: 'Specialist personas auto-routed by intent', argo: '12', kis: false, replit: false, lovable: false },
-  { feature: 'Quality gate before deploy', argo: '33 checks', kis: 'partial', replit: false, lovable: false },
-  { feature: 'Auto-fix loop re-prompts model on gate failure', argo: 'up to 3', kis: false, replit: false, lovable: false },
-  { feature: 'Reference-pattern library cribbed from real production', argo: '32 snippets', kis: false, replit: false, lovable: false },
-  { feature: 'Operator runs it from email — never opens the workspace', argo: true, kis: false, replit: false, lovable: false },
-  { feature: 'Approve / Edit / Decline — three buttons, never more', argo: true, kis: false, replit: false, lovable: false },
-  { feature: 'Self-healing repair via signed approval link', argo: true, kis: false, replit: false, lovable: false },
-  { feature: 'Persistent operator memory (visible + prunable)', argo: 'supermemory.ai', kis: false, replit: false, lovable: false },
-  { feature: 'Per-operation isolated sandbox + namespace', argo: 'Blaxel', kis: 'partial', replit: 'partial', lovable: false },
-  { feature: 'Live cost meter during build (per-token, per-cycle)', argo: true, kis: false, replit: false, lovable: false },
-  { feature: 'Read-only Code tab with full bundle search (auditor-grade)', argo: true, kis: 'partial', replit: 'partial', lovable: false },
-  { feature: 'Diff viewer between any two bundle versions', argo: true, kis: false, replit: false, lovable: false },
-  { feature: 'Replay every agent invocation with PII-redacted envelope', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'Auto-refund on platform errors (never pay for our bugs)', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'Diff review before ANY code change (no silent modifications)', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'Full version history with one-click rollback', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'Loop detection — stops and refunds after 3 failed attempts', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'Quality gate (49 checks) + security scanner (15 categories)', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'Auto-generated regression tests before every change', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'Transparent pricing — per-model, per-token, no opaque credits', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'One-click code export (download ZIP or push to GitHub)', argo: true, kis: false, replit: 'partial', lovable: 'partial' },
+  { feature: 'Custom domains with auto-SSL', argo: true, kis: false, replit: 'partial', lovable: false },
+  { feature: 'Data browser (no SQL/RLS knowledge needed)', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'AI agent builder with sandbox deployment', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'Self-healing — detects errors, proposes fix, waits for approval', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'Human support for platform bugs (not just AI chat)', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'No secrets in plain text (enforced by quality gate)', argo: true, kis: false, replit: false, lovable: false },
+  { feature: 'Production-grade by default (auth, rate limiting, health checks)', argo: true, kis: false, replit: 'partial', lovable: false },
+  { feature: 'Built for non-developers (conversational, click-through setup)', argo: true, kis: false, replit: false, lovable: 'partial' },
+  { feature: 'Operate from email — approve/reject without opening dashboard', argo: true, kis: false, replit: false, lovable: false },
 ];
 
 const FAQ = [
   {
     q: 'Who is Argo for?',
-    a: 'Solo operators and small teams running real businesses on glue code: recruiters, agency owners, indie SaaS founders, ops leads. People who don\'t want to learn AWS to ship a refund flow.',
+    a: 'Solo operators and small teams running real businesses: recruiters, agency owners, indie SaaS founders, ops leads. People who need software that actually works in production, not another fragile demo.',
   },
   {
-    q: 'How is this different from Replit / Lovable / Bolt?',
-    a: 'Those tools generate code. Argo runs the operation forever. The output ships through a 33-check quality gate, gets its own sandbox, and self-heals on failure via email-approved repairs.',
+    q: 'How is this different from Replit / Lovable / Bolt / Emergent?',
+    a: 'Those tools generate code and hope it works. Users report agents that lie about changes, credits burning during platform crashes, and entire codebases disappearing. Argo runs 49 quality checks + 15 security scans + regression tests before EVERY deploy. We auto-refund platform errors. We never apply code changes without showing you a diff first. We never delete your code.',
   },
   {
-    q: 'What stack does Argo write?',
-    a: 'Typed Fastify + Zod + Mongo + BullMQ — Node 20, ESM. Twelve specialist personas pick the right shape: REST API, CRUD app, scraper pipeline, scheduled job, webhook bridge, Slack bot, form workflow, multi-tenant SaaS, agent runtime, data pipeline, search service, internal tool.',
+    q: 'What about pricing? I\'ve been burned by credit systems before.',
+    a: 'We hear you. Argo\'s guarantee: platform crashes, AI loops, and environment errors NEVER consume your credits. We auto-refund failed invocations. You see exactly what each model costs — per token, per invocation, per operation. No opaque credits. No surprises.',
+  },
+  {
+    q: 'What if the AI breaks my working code?',
+    a: 'It can\'t. Every change is shown as a visual diff before it\'s applied. Risky changes (schema, auth, routing) require explicit approval. Regression tests run before every change — if your change would break existing features, Argo blocks it. Plus, full version history with one-click rollback to any prior state.',
+  },
+  {
+    q: 'Can I take my code and leave?',
+    a: 'Absolutely. One-click download as ZIP. One-click push to GitHub. Standard Node.js/React — runs anywhere. No lock-in, ever. You own your code.',
   },
   {
     q: 'Do I see the code?',
-    a: 'Always. Read-only Code tab in the workspace, syntax-highlighted, with full bundle search. Auditors love it. You usually won\'t need to read it.',
+    a: 'Always. Read-only Code tab with syntax highlighting and full bundle search. Plus a data browser so you can see what\'s in your database without learning SQL. Auditors love it.',
   },
   {
-    q: 'What if Argo gets it wrong?',
-    a: 'The auto-fix loop catches most issues before deploy. After deploy, Argo detects failures, proposes a repair, and emails you for approval — Approve, Edit, Decline. Never auto-applies a change.',
+    q: 'What about support?',
+    a: 'Real humans for serious problems. Platform bugs, data incidents, and complex debugging are handled by engineers, not just AI. You never pay credits to troubleshoot our bugs. This is the opposite of what Lovable and Emergent do.',
   },
   {
-    q: 'Why "operate forever" instead of "ship a one-shot"?',
-    a: 'Because that\'s what operators actually need. Generic vibe coders are great for prototypes. Argo is for the workflow you don\'t want to babysit at 2am — the one that runs your business while you sleep.',
+    q: 'Is this production-ready or another prototype tool?',
+    a: 'Production-ready. Every generated app ships with a real test suite, health checks, logging, rate limiting, input validation, and secrets management. No passwords in plain text. No spaghetti code. No "AI slop." The quality gate enforces this on every single deploy.',
   },
 ];
 
@@ -173,24 +183,24 @@ const FAQ = [
 // who Argo is built for. No fake testimonials, no invented names.
 const ARCHETYPES = [
   {
-    role: 'The solo recruiter',
-    pain: 'Six hours a week on candidate triage. Forms in Typeform, replies copy-pasted from a Notion doc, follow-ups slipping through the cracks.',
-    win: 'One sentence describing the workflow. Argo writes the form, the classifier, the rejection mailer, the forward-to-client gate. They open email instead of a dashboard.',
+    role: 'The recruiter who tried Lovable',
+    pain: 'Built a candidate intake in Lovable. Looked great for a week. Then asked for a phone field — the AI broke the email flow, burned $180 in credits trying to fix it, and support said "try rephrasing your prompt."',
+    win: 'One sentence in Argo. Three clicks to configure. Regression tests run before every change. Adding a phone field? 12 baseline tests pass, field added, 12 tests pass again. Zero regressions. Zero credits burned on loops.',
   },
   {
-    role: 'The agency owner',
-    pain: 'Intake, refunds, client onboarding — three Zapier chains held together with API keys nobody remembers rotating. Every change needs a contractor.',
-    win: 'Three production sandboxes, each with its own quality gate, its own audit log, its own self-healing repair flow. Three operations, three URLs, zero tickets.',
+    role: 'The founder burned by Bolt',
+    pain: 'Built an MVP, was about to deploy, and the AI deleted half the codebase. Lost a week of work. Bolt support? Silence for 5 days. Had to buy more tokens just to rebuild what the AI destroyed.',
+    win: 'Every version saved in Argo. One-click rollback to any prior state. Code changes require your approval — the AI shows you a diff first. Nothing is ever permanently deleted. And we never charge you for our bugs.',
   },
   {
-    role: 'The indie SaaS founder',
-    pain: 'Wants double-opt-in newsletter without paying Mailchimp. Wants a refund form that doesn\'t need Stripe Tax integration just to print a receipt.',
-    win: 'One sentence in. Forty-five seconds to a live URL with a real Mongo backing it. Voice and compliance learned in a click-through, not a settings panel.',
+    role: 'The agency owner who outgrew Replit',
+    pain: 'Three internal tools running on Replit. The AI agent keeps modifying files without asking, ignoring instructions, and taking shortcuts. The IDE lags. The billing is unpredictable. But the tools are too entangled to migrate.',
+    win: 'Each operation runs in its own isolated sandbox with its own quality gate. Export your code to GitHub with one click. Transparent per-operation billing. And the AI never touches your code without showing you what it will change first.',
   },
   {
-    role: 'The ops lead at a Series A',
-    pain: 'Two contractors maintain ten internal tools. Each tool has a "single point of failure" and a Slack thread for outages.',
-    win: 'The 33-check gate catches the bugs the contractors used to ship. Repairs are proposed by email and approved with a click. Outages get repair PRs, not Slack pings.',
+    role: 'The dev who doesn\'t trust vibe-coded apps',
+    pain: 'Saw the r/vibecoding posts: spaghetti code, passwords in plain text, no tests, no structure. Told the CEO "we can\'t ship this" after reviewing the output from Emergent.',
+    win: '49 quality checks enforce clean architecture. 15 security scan categories catch secrets in plain text, SQL injection, XSS, and more. Every app ships with auto-generated tests, health checks, rate limiting, and input validation. Show this to your CTO.',
   },
 ];
 
@@ -204,11 +214,14 @@ const TECH_STACK = [
 ];
 
 const REFUSALS = [
-  'We refuse to ship code that breaks on Tuesday.',
-  'We refuse to make you read logs.',
-  'We refuse to make you write a prompt longer than a sentence.',
-  'We refuse to ship credit-based pricing.',
-  'We refuse to be another vibe coder.',
+  'We refuse to charge you when our platform crashes.',
+  'We refuse to let the AI delete your working code.',
+  'We refuse to ship changes without showing you a diff first.',
+  'We refuse to hide behind opaque "credits" — you see every cent.',
+  'We refuse to loop on the same bug and burn your money.',
+  'We refuse to put secrets in plain text. Ever.',
+  'We refuse to say "fixed" when it isn\'t. Tests must pass.',
+  'We refuse to be another fragile demo tool. We build production software.',
 ];
 
 const CITY_NODES = [
@@ -237,8 +250,8 @@ export function Landing() {
   return (
     <div ref={containerRef} className="min-h-screen bg-argo-bg text-argo-text antialiased overflow-x-hidden">
       <ScrollProgressBar progress={smoothProgress} />
-      <Nav onSignIn={() => setView('sign-in')} />
-      <Hero onSignIn={() => setView('sign-in')} />
+      <Nav onSignIn={() => setView('sign-in')} setView={setView} />
+      <Hero onSignIn={() => setView('sign-in')} setView={setView} />
       <TrustStrip />
       <BigNumbers />
       <BuildPreview3D />
@@ -283,7 +296,7 @@ function ScrollProgressBar({ progress }: { progress: MotionValue<number> }) {
 // Nav
 // ──────────────────────────────────────────────────────────────────────
 
-function Nav({ onSignIn }: { onSignIn: () => void }) {
+function Nav({ onSignIn, setView }: { onSignIn: () => void; setView: (v: 'guarantees') => void }) {
   return (
     <nav className="fixed top-0 left-0 right-0 z-40 backdrop-blur-md bg-argo-bg/70 border-b border-argo-border">
       <div className="mx-auto max-w-7xl px-6 h-14 flex items-center justify-between">
@@ -293,6 +306,7 @@ function Nav({ onSignIn }: { onSignIn: () => void }) {
           <a href="#quality" className="text-argo-textSecondary hover:text-argo-text transition-colors hidden md:inline">Quality</a>
           <a href="#vs" className="text-argo-textSecondary hover:text-argo-text transition-colors hidden md:inline">Vs others</a>
           <a href="#faq" className="text-argo-textSecondary hover:text-argo-text transition-colors hidden md:inline">FAQ</a>
+          <button type="button" onClick={() => setView('guarantees')} className="text-argo-accent hover:text-argo-text transition-colors hidden md:inline font-medium">Guarantees</button>
           <a href="https://github.com/AlgoRythmTech/argo" target="_blank" rel="noreferrer" className="text-argo-textSecondary hover:text-argo-text transition-colors hidden sm:inline-flex items-center gap-1">
             <Github className="h-3.5 w-3.5" /> GitHub
           </a>
@@ -313,7 +327,7 @@ function Nav({ onSignIn }: { onSignIn: () => void }) {
 // Hero
 // ──────────────────────────────────────────────────────────────────────
 
-function Hero({ onSignIn }: { onSignIn: () => void }) {
+function Hero({ onSignIn, setView }: { onSignIn: () => void; setView: (view: 'demo' | 'studio') => void }) {
   const mouseX = useMotionValue(0.5);
   const mouseY = useMotionValue(0.5);
   const orb1X = useTransform(mouseX, [0, 1], [-40, 40]);
@@ -355,7 +369,7 @@ function Hero({ onSignIn }: { onSignIn: () => void }) {
             Live preview hosted on Blaxel · Email through AgentMail · Memory via supermemory.ai
           </span>
           <span className="inline-flex items-center gap-2 rounded-full border border-fuchsia-500/30 bg-fuchsia-500/10 px-3 py-1 text-xs text-fuchsia-300 font-mono uppercase tracking-widest">
-            The AI Business Operator
+            Never Ship Broken Workflows
           </span>
         </motion.div>
         <motion.h1
@@ -375,10 +389,11 @@ function Hero({ onSignIn }: { onSignIn: () => void }) {
           transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1], delay: 0.16 }}
           className="argo-body text-lg sm:text-xl text-argo-textSecondary max-w-2xl mb-10"
         >
-          Argo isn't an IDE. Isn't a code-gen platform. Isn't a "development partner." It's an{' '}
-          <span className="text-argo-text">operator</span>. One sentence in. Click-through scope.
-          GPT-5.5 writes the typed stack. A 33-check quality gate enforces production-grade. Live URL
-          in 90 seconds. Then Argo runs the workflow — from your email — forever.
+          Replit generates code. Lovable prototypes UIs. Argo{' '}
+          <span className="text-argo-text">refuses to ship changes that break what already works</span>.
+          49 quality checks, 15 security scans, auto-generated regression tests, and human approval
+          gates — on every single deploy. One sentence in. Live workflow in 90 seconds. Then it
+          operates your business while you sleep.
         </motion.p>
         <motion.div
           initial={{ opacity: 0, y: 8 }}
@@ -391,14 +406,15 @@ function Hero({ onSignIn }: { onSignIn: () => void }) {
             onClick={onSignIn}
             className="bg-argo-accent text-argo-bg font-medium rounded-full px-6 py-3 inline-flex items-center gap-2"
           >
-            Start scoping <ArrowRight className="h-4 w-4" />
+            Start building <ArrowRight className="h-4 w-4" />
           </LiquidButton>
-          <a
-            href="#how"
-            className="inline-flex items-center gap-2 rounded-full border border-argo-border px-5 py-3 text-sm text-argo-textSecondary hover:text-argo-text hover:border-argo-accent/40 transition-colors"
+          <button
+            type="button"
+            onClick={() => setView('demo')}
+            className="inline-flex items-center gap-2 rounded-full border border-fuchsia-500/30 bg-fuchsia-500/10 px-5 py-3 text-sm text-fuchsia-300 hover:bg-fuchsia-500/20 hover:border-fuchsia-500/50 transition-colors"
           >
-            <Play className="h-4 w-4" /> Watch the 60-second demo
-          </a>
+            <Play className="h-4 w-4" /> See the recruiting demo
+          </button>
         </motion.div>
 
         {/* Floating 3D micro cards */}

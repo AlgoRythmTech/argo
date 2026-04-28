@@ -17,6 +17,8 @@ import {
   type ReviewReport,
 } from './multi-agent-build.js';
 import { validateDependencies, renderDependencyFailures, type DependencyValidationResult } from './npm-validator.js';
+import { runSecurityScan, renderSecurityReportAsAutoFixPrompt, type SecurityScanReport } from './security-scanner.js';
+import { generateTestSuiteForBundle, type GeneratedTestSuite } from './test-suite-generator.js';
 
 export interface AutoFixArgs {
   specialist: Specialist;
@@ -107,6 +109,8 @@ export type AutoFixCycleEvent =
   | { kind: 'actions_parsed'; cycle: number; actions: ParsedAction[]; prose: string }
   | { kind: 'gate_run'; cycle: number; report: QualityReport }
   | { kind: 'npm_check'; cycle: number; result: DependencyValidationResult }
+  | { kind: 'security_scan'; cycle: number; report: SecurityScanReport }
+  | { kind: 'test_suite_generated'; cycle: number; suite: GeneratedTestSuite['summary'] }
   | { kind: 'testing_run'; cycle: number; report: TestingReport }
   | { kind: 'reviewer_run'; cycle: number; report: ReviewReport }
   | { kind: 'cycle_complete'; cycle: number; passed: boolean }
@@ -305,15 +309,55 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
       }
     }
 
+    // Security scanner: runs after the static gate and npm validation
+    // are clean. Catches injection, auth bypass, data exposure, SSRF,
+    // and other vulnerability classes that regex-based checks miss.
+    // Critical/high findings are blocking and trigger a re-prompt.
+    let securityReport: SecurityScanReport | null = null;
+    if (report.passed && (npmResult == null || npmResult.allValid)) {
+      try {
+        securityReport = runSecurityScan(bundle);
+        const secEvt: AutoFixCycleEvent = { kind: 'security_scan', cycle, report: securityReport };
+        history.push(secEvt);
+        args.onCycle?.(secEvt);
+      } catch (err) {
+        console.warn('[auto-fix-loop] security scan crashed:', String(err).slice(0, 200));
+      }
+    }
+
+    // Test suite generation: inject auto-generated tests into the bundle
+    // so the testing agent can run them. This happens before runtime
+    // testing so the generated tests are exercised as part of the boot.
+    if (
+      report.passed &&
+      (npmResult == null || npmResult.allValid) &&
+      (securityReport == null || securityReport.passed)
+    ) {
+      try {
+        const suite = generateTestSuiteForBundle(bundle);
+        if (suite.files.length > 0) {
+          for (const tf of suite.files) {
+            files.set(tf.path, tf.contents);
+          }
+          const suiteEvt: AutoFixCycleEvent = { kind: 'test_suite_generated', cycle, suite: suite.summary };
+          history.push(suiteEvt);
+          args.onCycle?.(suiteEvt);
+        }
+      } catch (err) {
+        console.warn('[auto-fix-loop] test suite generation failed:', String(err).slice(0, 200));
+      }
+    }
+
     // Runtime testing agent: only after the static gate is clean AND
-    // the npm validation didn't find hallucinations. If npm flagged
-    // packages we won't waste a boot — re-prompt instead.
+    // the npm validation didn't find hallucinations AND the security
+    // scan passed. If anything flagged, re-prompt instead.
     let testingReport: TestingReport | null = null;
     const runtimeTestingEnabled = args.enableRuntimeTesting !== false;
     if (
       report.passed &&
       runtimeTestingEnabled &&
-      (npmResult == null || npmResult.allValid)
+      (npmResult == null || npmResult.allValid) &&
+      (securityReport == null || securityReport.passed)
     ) {
       try {
         testingReport = await runTestingAgent({
@@ -369,6 +413,7 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
     const cyclePassed =
       report.passed &&
       (npmResult == null || npmResult.allValid) &&
+      (securityReport == null || securityReport.passed) &&
       (testingReport == null || testingReport.passed) &&
       (reviewReport == null || reviewReport.passed);
     const completeEvt: AutoFixCycleEvent = {
@@ -404,6 +449,9 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
       ...(testingReport && !testingReport.passed
         ? { runtimeReport: renderTestingReportAsAutoFixPrompt(testingReport) }
         : {}),
+      ...(securityReport && !securityReport.passed
+        ? { securityReport: renderSecurityReportAsAutoFixPrompt(securityReport) }
+        : {}),
       ...(reviewReport && !reviewReport.passed
         ? { reviewerReport: renderReviewAsAutoFixPrompt(reviewReport) }
         : {}),
@@ -433,6 +481,8 @@ function composeRetryPrompt(args: {
   report: QualityReport;
   /** Optional runtime-test report when the testing agent fired and failed. */
   runtimeReport?: string;
+  /** Optional security scan report when vulnerabilities were found. */
+  securityReport?: string;
   /** Optional reviewer report when multi-agent mode caught issues. */
   reviewerReport?: string;
   /** Optional npm validation report when packages were hallucinated. */
@@ -455,6 +505,12 @@ function composeRetryPrompt(args: {
   }
   if (args.npmReport) {
     lines.push(args.npmReport);
+    lines.push('');
+  }
+  if (args.securityReport) {
+    lines.push('## Security scan failures');
+    lines.push('');
+    lines.push(args.securityReport);
     lines.push('');
   }
   if (args.runtimeReport) {

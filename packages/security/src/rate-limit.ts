@@ -39,8 +39,14 @@ export async function rateLimitFixedWindow(
   if (!result) {
     return { allowed: false, remaining: 0, resetSeconds: config.windowSeconds };
   }
+  // Redis multi().exec() returns an array of [error, result] pairs.
+  // For ioredis, each element is [error, value] or just the value depending on version.
   const incrResult = result[0];
-  const count = (incrResult && Array.isArray(incrResult) ? Number(incrResult[1]) : 0) || 0;
+  const count = typeof incrResult === 'number'
+    ? incrResult
+    : Array.isArray(incrResult)
+      ? Number(incrResult[1] ?? incrResult[0] ?? 0)
+      : Number(incrResult ?? 0);
   const remaining = Math.max(0, config.limit - count);
   return {
     allowed: count <= config.limit,

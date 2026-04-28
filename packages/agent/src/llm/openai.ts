@@ -91,7 +91,8 @@ export class OpenAiClient {
   ): Promise<LlmCallResult> {
     const jsonSchema = zodToJsonSchema(args.schema, args.schemaName);
 
-    const body = {
+    const temp = tempForModel(args.model, args.temperature);
+    const body: Record<string, unknown> = {
       model: args.model,
       messages: [
         { role: 'system' as const, content: pickSystemPrompt(args.schemaName) },
@@ -105,9 +106,9 @@ export class OpenAiClient {
           strict: false,
         },
       },
-      max_tokens: args.maxTokens,
-      temperature: args.temperature,
+      max_completion_tokens: args.maxTokens,
     };
+    if (temp !== undefined) body.temperature = temp;
 
     const res = await request(`${this.cfg.apiBase}/chat/completions`, {
       method: 'POST',
@@ -136,7 +137,8 @@ export class OpenAiClient {
   private async completeJsonObject<TSchema extends z.ZodTypeAny>(
     args: OpenAiCompleteArgs<TSchema>,
   ): Promise<LlmCallResult> {
-    const body = {
+    const temp2 = tempForModel(args.model, args.temperature);
+    const body: Record<string, unknown> = {
       model: args.model,
       messages: [
         {
@@ -146,9 +148,9 @@ export class OpenAiClient {
         { role: 'user' as const, content: args.prompt },
       ],
       response_format: { type: 'json_object' as const },
-      max_tokens: args.maxTokens,
-      temperature: args.temperature,
+      max_completion_tokens: args.maxTokens,
     };
+    if (temp2 !== undefined) body.temperature = temp2;
 
     const res = await request(`${this.cfg.apiBase}/chat/completions`, {
       method: 'POST',
@@ -165,6 +167,70 @@ export class OpenAiClient {
       throw new Error(`OpenAI fallback ${args.model} -> ${res.statusCode}: ${text.slice(0, 400)}`);
     }
     return this.unwrapResponse(text, args.model);
+  }
+
+  /**
+   * Free-form text completion (no JSON schema constraint). Used by the
+   * conversational chat assistant where structured output isn't needed.
+   */
+  async completeText(args: {
+    model: string;
+    systemPrompt: string;
+    userPrompt: string;
+    maxTokens: number;
+    temperature: number;
+  }): Promise<{ text: string; model: string; promptTokens: number | null; completionTokens: number | null }> {
+    const candidates = uniqueModels([args.model, process.env.OPENAI_MODEL_FALLBACK ?? 'gpt-4o']);
+    let lastErr: Error | null = null;
+    for (const model of candidates) {
+      try {
+        const temp3 = tempForModel(model, args.temperature);
+        const body: Record<string, unknown> = {
+          model,
+          messages: [
+            { role: 'system' as const, content: args.systemPrompt },
+            { role: 'user' as const, content: args.userPrompt },
+          ],
+          max_completion_tokens: args.maxTokens,
+        };
+        if (temp3 !== undefined) body.temperature = temp3;
+        const res = await request(`${this.cfg.apiBase}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${this.cfg.apiKey}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(body),
+          bodyTimeout: this.cfg.timeoutMs,
+          headersTimeout: this.cfg.timeoutMs,
+        });
+        const text = await res.body.text();
+        if (res.statusCode >= 400) {
+          const e: Error & { status?: number } = new Error(
+            `OpenAI ${model} -> ${res.statusCode}: ${text.slice(0, 400)}`,
+          );
+          e.status = res.statusCode;
+          throw e;
+        }
+        const parsed = JSON.parse(text) as {
+          choices?: Array<{ message?: { content?: string } }>;
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
+        };
+        return {
+          text: parsed.choices?.[0]?.message?.content ?? '',
+          model,
+          promptTokens: parsed.usage?.prompt_tokens ?? null,
+          completionTokens: parsed.usage?.completion_tokens ?? null,
+        };
+      } catch (err) {
+        const e = err as Error & { status?: number };
+        const transient = e.status === 404 || e.status === 400 || /model_not_found|does not exist/i.test(e.message ?? '');
+        if (!transient) throw err;
+        lastErr = e;
+        log.warn({ model, err: e.message }, 'openai text model unavailable, falling back');
+      }
+    }
+    throw lastErr ?? new Error('OpenAI text completion failed across all candidates');
   }
 
   private unwrapResponse(text: string, model: string): LlmCallResult {
@@ -184,6 +250,16 @@ export class OpenAiClient {
       costUsd: null,
     };
   }
+}
+
+/**
+ * GPT-5.5 does not support the temperature parameter — only default (1) is
+ * accepted. Return the temperature value to include in the request body, or
+ * undefined to omit it entirely.
+ */
+function tempForModel(model: string, requested: number): number | undefined {
+  if (model.startsWith('gpt-5.5')) return undefined;
+  return requested;
 }
 
 function uniqueModels(models: string[]): string[] {

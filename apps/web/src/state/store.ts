@@ -14,7 +14,7 @@ export type DeployPhase =
   | { phase: 'ready'; publicUrl: string }
   | { phase: 'failed'; message: string };
 
-export type AppView = 'landing' | 'sign-in' | 'workspace' | 'repair-review';
+export type AppView = 'landing' | 'sign-in' | 'workspace' | 'repair-review' | 'studio' | 'demo' | 'guarantees';
 
 interface ArgoStore {
   view: AppView;

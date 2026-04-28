@@ -6,6 +6,7 @@ import {
   Eye,
   FileCode2,
   Inbox,
+  Key,
   Loader2,
   Monitor,
   RefreshCw,
@@ -15,6 +16,8 @@ import {
   Smartphone,
   Sparkles,
   Tablet,
+  Terminal,
+  Zap,
 } from 'lucide-react';
 import { operations, type GeneratedBundle, type Operation, type PreviewAction } from '../api/client.js';
 import { CodeViewer } from './CodeViewer.js';
@@ -22,10 +25,18 @@ import { BundleDiffViewer } from './BundleDiffViewer.js';
 import { ReplayPanel } from './ReplayPanel.js';
 import { NotificationsInbox } from './NotificationsInbox.js';
 import { MemoryPanel } from './MemoryPanel.js';
+import { EnvVarsPanel } from './EnvVarsPanel.js';
+import { LogsViewer } from './LogsViewer.js';
+import { IterationPanel } from './IterationPanel.js';
 import { PreviewErrorOverlay } from './PreviewErrorOverlay.js';
+import { WorkflowAutomation } from './WorkflowAutomation.js';
+import { PipelineVisualization } from './PipelineVisualization.js';
+import { GuardrailsDashboard } from './GuardrailsDashboard.js';
+import { DataBrowser } from './DataBrowser.js';
+import { ErrorBoundary } from './ErrorBoundary.js';
 import { cn } from '../lib/utils.js';
 
-export type PreviewTab = 'preview' | 'code' | 'diff' | 'replay' | 'inbox' | 'memory';
+export type PreviewTab = 'preview' | 'code' | 'diff' | 'replay' | 'inbox' | 'memory' | 'env' | 'logs' | 'iterate' | 'workflow' | 'pipeline' | 'guardrails' | 'data' | 'export' | 'domains';
 
 interface PreviewPaneProps {
   operation: Operation | null;
@@ -137,6 +148,27 @@ export function PreviewPane({ operation, onAskArgo }: PreviewPaneProps) {
           </TabButton>
           <TabButton active={tab === 'memory'} onClick={() => setTab('memory')} icon={<Brain className="h-3.5 w-3.5" />}>
             Memory
+          </TabButton>
+          <TabButton active={tab === 'env'} onClick={() => setTab('env')} icon={<Key className="h-3.5 w-3.5" />}>
+            Env
+          </TabButton>
+          <TabButton active={tab === 'logs'} onClick={() => setTab('logs')} icon={<Terminal className="h-3.5 w-3.5" />}>
+            Logs
+          </TabButton>
+          <TabButton active={tab === 'iterate'} onClick={() => setTab('iterate')} icon={<Zap className="h-3.5 w-3.5" />}>
+            Iterate
+          </TabButton>
+          <TabButton active={tab === 'workflow'} onClick={() => setTab('workflow')} icon={<Repeat className="h-3.5 w-3.5" />}>
+            Flow
+          </TabButton>
+          <TabButton active={tab === 'pipeline'} onClick={() => setTab('pipeline')} icon={<ShieldCheck className="h-3.5 w-3.5" />}>
+            Pipeline
+          </TabButton>
+          <TabButton active={tab === 'guardrails'} onClick={() => setTab('guardrails')} icon={<ShieldCheck className="h-3.5 w-3.5" />}>
+            Guards
+          </TabButton>
+          <TabButton active={tab === 'data'} onClick={() => setTab('data')} icon={<Inbox className="h-3.5 w-3.5" />}>
+            Data
           </TabButton>
         </div>
         {tab === 'preview' && (
@@ -253,6 +285,85 @@ export function PreviewPane({ operation, onAskArgo }: PreviewPaneProps) {
               className="absolute inset-0"
             >
               <MemoryPanel operationId={operation.id} />
+            </motion.div>
+          ) : tab === 'env' ? (
+            <motion.div
+              key="env"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0"
+            >
+              <EnvVarsPanel operationId={operation.id} />
+            </motion.div>
+          ) : tab === 'logs' ? (
+            <motion.div
+              key="logs"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0"
+            >
+              <LogsViewer operationId={operation.id} />
+            </motion.div>
+          ) : tab === 'iterate' ? (
+            <motion.div
+              key="iterate"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0"
+            >
+              <IterationPanel operationId={operation.id} operationName={operation.name} />
+            </motion.div>
+          ) : tab === 'workflow' ? (
+            <motion.div
+              key="workflow"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0 overflow-y-auto"
+            >
+              <WorkflowAutomation operationId={operation.id} />
+            </motion.div>
+          ) : tab === 'pipeline' ? (
+            <motion.div
+              key="pipeline"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0 overflow-y-auto"
+            >
+              <PipelineVisualization operationId={operation.id} />
+            </motion.div>
+          ) : tab === 'guardrails' ? (
+            <motion.div
+              key="guardrails"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0 overflow-y-auto"
+            >
+              <GuardrailsDashboard operationId={operation.id} />
+            </motion.div>
+          ) : tab === 'data' ? (
+            <motion.div
+              key="data"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0 overflow-y-auto"
+            >
+              <ErrorBoundary name="data-browser">
+                <DataBrowser operationId={operation.id} />
+              </ErrorBoundary>
             </motion.div>
           ) : (
             <motion.div

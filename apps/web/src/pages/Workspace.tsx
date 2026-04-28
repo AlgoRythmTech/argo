@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronRight, Copy, ExternalLink, LogOut, Plus, Wrench } from 'lucide-react';
+import { BarChart3, Bot, ChevronRight, Copy, DollarSign, ExternalLink, LayoutGrid, LogOut, MessageCircle, Plus, Shield, Workflow, Wrench } from 'lucide-react';
 import { useArgo } from '../state/store.js';
 import {
   activity,
@@ -26,6 +26,14 @@ import { OperationReadmeButton } from '../components/OperationReadmeButton.js';
 import { HealthBadge } from '../components/HealthBadge.js';
 import { WorkspaceEmptyState } from '../components/WorkspaceEmptyState.js';
 import { EmailPreviewModal } from '../components/EmailPreviewModal.js';
+import { TemplateGallery } from '../components/TemplateGallery.js';
+import { ChatPanel } from '../components/ChatPanel.js';
+import { AnalyticsDashboard } from '../components/AnalyticsDashboard.js';
+import { GuardrailsDashboard } from '../components/GuardrailsDashboard.js';
+import { ROIDashboard } from '../components/ROIDashboard.js';
+import { AgentBuilder } from '../components/AgentBuilder.js';
+import { PipelineVisualization } from '../components/PipelineVisualization.js';
+import { ErrorBoundary } from '../components/ErrorBoundary.js';
 import { cn } from '../lib/utils.js';
 
 type BuilderState =
@@ -61,7 +69,9 @@ export function Workspace() {
   const [builderState, setBuilderState] = useState<BuilderState>({ phase: 'idle' });
   const [isPromptLoading, setPromptLoading] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showTemplateGallery, setShowTemplateGallery] = useState(false);
   const [activeBuildPrompt, setActiveBuildPrompt] = useState<string | null>(null);
+  const [rightPanel, setRightPanel] = useState<'activity' | 'chat' | 'analytics' | 'guardrails' | 'roi' | 'agents'>('activity');
 
   const activeOp = useMemo(() => ops.find((o) => o.id === activeId) ?? null, [ops, activeId]);
 
@@ -245,13 +255,20 @@ export function Workspace() {
           )}
         </div>
 
-        <div className="px-3 py-3 border-t border-argo-border">
+        <div className="px-3 py-3 border-t border-argo-border space-y-2">
           <button
             type="button"
-            onClick={() => setShowCreateModal(true)}
+            onClick={() => setShowTemplateGallery(true)}
+            className="w-full flex items-center justify-center gap-2 rounded-md border border-argo-accent/40 bg-argo-accent/10 text-argo-accent text-sm font-medium py-2 hover:bg-argo-accent/20 transition-colors"
+          >
+            <LayoutGrid className="h-4 w-4" /> Templates
+          </button>
+          <button
+            type="button"
+            onClick={() => setView('studio')}
             className="w-full flex items-center justify-center gap-2 rounded-md bg-argo-accent text-argo-bg text-sm font-semibold py-2 hover:bg-argo-accent/90 transition-colors"
           >
-            <Plus className="h-4 w-4" /> New Operation
+            <Plus className="h-4 w-4" /> New Workflow
           </button>
         </div>
       </aside>
@@ -317,11 +334,16 @@ export function Workspace() {
               <AgentPlan tasks={tasks} initialExpandedIds={tasks.map((t) => t.id)} />
             </div>
             {activeBuildPrompt && activeOp ? (
-              <BuildStream
-                operationId={activeOp.id}
-                prompt={activeBuildPrompt}
-                onComplete={() => undefined}
-              />
+              <div className="flex flex-col overflow-hidden">
+                <PipelineVisualization operationId={activeOp.id} />
+                <div className="flex-1 overflow-hidden border-t border-argo-border">
+                  <BuildStream
+                    operationId={activeOp.id}
+                    prompt={activeBuildPrompt}
+                    onComplete={() => undefined}
+                  />
+                </div>
+              </div>
             ) : activeOp && !activeOp.publicUrl ? (
               <ScopingPanel
                 operationId={activeOp.id}
@@ -358,40 +380,103 @@ export function Workspace() {
         </div>
       </main>
 
-      {/* ── Right: activity feed ──────────────────────────────────── */}
+      {/* ── Right: activity / chat / analytics ────────────────────── */}
       <aside className="border-l border-argo-border flex flex-col">
-        <div className="px-4 py-4 border-b border-argo-border flex items-center justify-between">
-          <h3 className="text-xs font-mono uppercase tracking-widest text-argo-textSecondary">
-            Activity
-          </h3>
-          <span className="text-xs text-argo-textSecondary">
-            {me?.email ? me.email.split('@')[0] : ''}
-          </span>
+        {/* Tab bar */}
+        <div className="flex flex-wrap border-b border-argo-border">
+          {([
+            { key: 'activity' as const, icon: <Wrench className="h-3.5 w-3.5" />, label: 'Activity' },
+            { key: 'chat' as const, icon: <MessageCircle className="h-3.5 w-3.5" />, label: 'Chat' },
+            { key: 'guardrails' as const, icon: <Shield className="h-3.5 w-3.5" />, label: 'Guards' },
+            { key: 'roi' as const, icon: <DollarSign className="h-3.5 w-3.5" />, label: 'ROI' },
+            { key: 'agents' as const, icon: <Bot className="h-3.5 w-3.5" />, label: 'Agents' },
+            { key: 'analytics' as const, icon: <BarChart3 className="h-3.5 w-3.5" />, label: 'Stats' },
+          ]).map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setRightPanel(tab.key)}
+              className={cn(
+                'flex-1 flex items-center justify-center gap-1.5 py-3 text-[11px] font-mono uppercase tracking-widest transition-colors',
+                rightPanel === tab.key
+                  ? 'text-argo-accent border-b-2 border-argo-accent'
+                  : 'text-argo-textSecondary hover:text-argo-text',
+              )}
+            >
+              {tab.icon}
+              {tab.label}
+            </button>
+          ))}
         </div>
-        <div className="flex-1 overflow-y-auto px-3 py-2">
-          {activityFeed.length === 0 ? (
-            <div className="text-xs text-argo-textSecondary text-center mt-12 px-4">
-              Nothing yet. As soon as Argo does something, you'll see it here.
+
+        {/* Panel content */}
+        {rightPanel === 'activity' && (
+          <>
+            <div className="flex-1 overflow-y-auto px-3 py-2">
+              {activityFeed.length === 0 ? (
+                <div className="text-xs text-argo-textSecondary text-center mt-12 px-4">
+                  Nothing yet. As soon as Argo does something, you'll see it here.
+                </div>
+              ) : (
+                <ul className="space-y-2">
+                  <AnimatePresence initial={false}>
+                    {activityFeed.map((entry) => (
+                      <ActivityRow key={entry.id} entry={entry} />
+                    ))}
+                  </AnimatePresence>
+                </ul>
+              )}
             </div>
-          ) : (
-            <ul className="space-y-2">
-              <AnimatePresence initial={false}>
-                {activityFeed.map((entry) => (
-                  <ActivityRow key={entry.id} entry={entry} />
-                ))}
-              </AnimatePresence>
-            </ul>
-          )}
-        </div>
-        <div className="border-t border-argo-border px-3 py-3">
-          <button
-            type="button"
-            onClick={() => setView('repair-review')}
-            className="w-full flex items-center justify-center gap-2 rounded-md border border-argo-border bg-argo-surface text-argo-textSecondary hover:text-argo-text text-sm py-2"
-          >
-            <Wrench className="h-4 w-4" /> Repairs
-          </button>
-        </div>
+            <div className="border-t border-argo-border px-3 py-3">
+              <button
+                type="button"
+                onClick={() => setView('repair-review')}
+                className="w-full flex items-center justify-center gap-2 rounded-md border border-argo-border bg-argo-surface text-argo-textSecondary hover:text-argo-text text-sm py-2"
+              >
+                <Wrench className="h-4 w-4" /> Repairs
+              </button>
+            </div>
+          </>
+        )}
+
+        {rightPanel === 'chat' && (
+          <ChatPanel
+            operationId={activeOp?.id}
+            onClose={() => setRightPanel('activity')}
+          />
+        )}
+
+        {rightPanel === 'guardrails' && activeOp && (
+          <ErrorBoundary name="guardrails">
+            <div className="flex-1 overflow-y-auto">
+              <GuardrailsDashboard operationId={activeOp.id} />
+            </div>
+          </ErrorBoundary>
+        )}
+
+        {rightPanel === 'roi' && (
+          <ErrorBoundary name="roi">
+            <div className="flex-1 overflow-y-auto">
+              <ROIDashboard operationId={activeOp?.id ?? ''} />
+            </div>
+          </ErrorBoundary>
+        )}
+
+        {rightPanel === 'agents' && (
+          <ErrorBoundary name="agents">
+            <div className="flex-1 overflow-y-auto">
+              <AgentBuilder operationId={activeOp?.id} />
+            </div>
+          </ErrorBoundary>
+        )}
+
+        {rightPanel === 'analytics' && (
+          <ErrorBoundary name="analytics">
+            <AnalyticsDashboard
+              onClose={() => setRightPanel('activity')}
+            />
+          </ErrorBoundary>
+        )}
       </aside>
 
       {showLoader && <AiLoader text={loaderText(builderState, deploy.phase)} />}
@@ -406,6 +491,17 @@ export function Workspace() {
           }}
         />
       )}
+
+      <TemplateGallery
+        open={showTemplateGallery}
+        onClose={() => setShowTemplateGallery(false)}
+        onUseTemplate={(op) => {
+          void operations.list().then((rows) => {
+            setOps(rows);
+            setActiveId(op.id);
+          });
+        }}
+      />
     </div>
   );
 }

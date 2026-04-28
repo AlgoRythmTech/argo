@@ -1,4 +1,4 @@
-import { request } from 'undici';
+import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import zodToJsonSchema from 'zod-to-json-schema';
 import pino from 'pino';
@@ -26,6 +26,16 @@ function pickSystemPrompt(schemaName: string): string {
 
 const log = pino({ name: 'anthropic-client', level: process.env.LOG_LEVEL ?? 'info' });
 
+/** Models that support the cache_control beta for system prompts. */
+const CACHE_ELIGIBLE_MODELS = new Set([
+  'claude-opus-4-6',
+  'claude-sonnet-4-6',
+  'claude-opus-4-7',
+  'claude-sonnet-4-5',
+  'claude-sonnet-4-20250514',
+  'claude-haiku-4-5-20251001',
+]);
+
 export type AnthropicConfig = {
   apiKey: string;
   apiBase: string;
@@ -44,22 +54,39 @@ export type AnthropicCompleteArgs<TSchema extends z.ZodTypeAny> = {
 };
 
 /**
- * Thin Anthropic client constrained to JSON output via tool use.
+ * Anthropic client using the official @anthropic-ai/sdk.
  *
- * Strategy: define a single tool whose input_schema is the JSON Schema for
- * the response. Force tool_choice to that tool. The first tool_use block in
- * the response is the JSON we want. This is the most reliable way to get
- * structured output from Claude in v1.
+ * Supports Claude Opus 4.6, Claude Sonnet 4.6, and all existing Claude
+ * models. Uses tool-use for structured JSON output (same strategy as the
+ * original undici-based client). Prompt caching is enabled for system
+ * prompts on eligible models via the cache_control header.
  *
  * Optional Emergent proxy mode: if EMERGENT_ENABLED=true the client targets
- * the Emergent universal endpoint (which also speaks the Anthropic Messages
- * shape). This lets us route around outages without changing call sites.
+ * the Emergent universal endpoint. This lets us route around outages without
+ * changing call sites.
  */
 export class AnthropicClient {
+  private readonly sdk: Anthropic;
+  private readonly emergentSdk: Anthropic | null;
+
   constructor(private readonly cfg: AnthropicConfig) {
     if (!cfg.apiKey && !cfg.emergentEnabled) {
       log.warn('ANTHROPIC_API_KEY missing — build engine will fail at first call');
     }
+
+    this.sdk = new Anthropic({
+      apiKey: cfg.apiKey || 'missing-key',
+      baseURL: cfg.apiBase.endsWith('/v1') ? cfg.apiBase : `${cfg.apiBase}/v1`,
+    });
+
+    this.emergentSdk = cfg.emergentEnabled && cfg.emergentApiKey
+      ? new Anthropic({
+          apiKey: cfg.emergentApiKey,
+          baseURL: cfg.emergentApiBase.endsWith('/v1')
+            ? cfg.emergentApiBase
+            : `${cfg.emergentApiBase}/v1`,
+        })
+      : null;
   }
 
   static fromEnv(): AnthropicClient {
@@ -77,7 +104,7 @@ export class AnthropicClient {
   ): Promise<LlmCallResult> {
     const candidates = uniqueModels([
       args.model,
-      process.env.ANTHROPIC_MODEL_FALLBACK ?? 'claude-sonnet-4-5',
+      process.env.ANTHROPIC_MODEL_FALLBACK ?? 'claude-haiku-4-5-20251001',
       'claude-sonnet-4-20250514',
     ]);
     let lastErr: Error | null = null;
@@ -101,87 +128,85 @@ export class AnthropicClient {
   private async completeJsonOnce<TSchema extends z.ZodTypeAny>(
     args: AnthropicCompleteArgs<TSchema>,
   ): Promise<LlmCallResult> {
-    const useEmergent = this.cfg.emergentEnabled && this.cfg.emergentApiKey.length > 0;
-    const apiBase = useEmergent ? this.cfg.emergentApiBase : this.cfg.apiBase;
-    const url = `${apiBase}/v1/messages`;
-    const apiKey = useEmergent ? this.cfg.emergentApiKey : this.cfg.apiKey;
+    const useEmergent = this.cfg.emergentEnabled && this.emergentSdk !== null;
+    const client = useEmergent ? this.emergentSdk! : this.sdk;
 
     const inputSchema = zodToJsonSchema(args.schema, args.schemaName);
     const toolName = 'argo_response';
 
-    const body = {
-      model: args.model,
-      max_tokens: args.maxTokens,
-      temperature: args.temperature,
-      tools: [
-        {
-          name: toolName,
-          description: `Return a JSON object that satisfies the ${args.schemaName} schema.`,
-          input_schema: inputSchema,
-        },
-      ],
-      tool_choice: { type: 'tool' as const, name: toolName },
-      system: `${pickSystemPrompt(args.schemaName)}\n\nReturn data exclusively via the argo_response tool. Do not produce free-text output.`,
-      messages: [{ role: 'user' as const, content: args.prompt }],
-    };
+    const systemPrompt = `${pickSystemPrompt(args.schemaName)}\n\nReturn data exclusively via the argo_response tool. Do not produce free-text output.`;
 
-    const res = await request(url, {
-      method: 'POST',
-      headers: useEmergent
-        ? {
-            authorization: `Bearer ${apiKey}`,
-            'content-type': 'application/json',
-            'anthropic-version': '2023-06-01',
-          }
-        : {
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json',
+    // Build the system parameter with prompt caching for eligible models.
+    const useCaching = CACHE_ELIGIBLE_MODELS.has(args.model);
+    const systemParam: Anthropic.MessageCreateParams['system'] = useCaching
+      ? [
+          {
+            type: 'text' as const,
+            text: systemPrompt,
+            cache_control: { type: 'ephemeral' as const },
           },
-      body: JSON.stringify(body),
-      bodyTimeout: 120_000,
-      headersTimeout: 120_000,
-    });
+        ]
+      : systemPrompt;
 
-    const text = await res.body.text();
-    if (res.statusCode >= 400) {
-      const e: Error & { status?: number } = new Error(
-        `Anthropic ${args.model} -> ${res.statusCode}: ${text.slice(0, 400)}`,
+    try {
+      const response = await client.messages.create({
+        model: args.model,
+        max_tokens: args.maxTokens,
+        temperature: args.temperature,
+        tools: [
+          {
+            name: toolName,
+            description: `Return a JSON object that satisfies the ${args.schemaName} schema.`,
+            input_schema: inputSchema as Anthropic.Tool['input_schema'],
+          },
+        ],
+        tool_choice: { type: 'tool' as const, name: toolName },
+        system: systemParam,
+        messages: [{ role: 'user' as const, content: args.prompt }],
+      });
+
+      const toolUse = response.content.find(
+        (c): c is Anthropic.ToolUseBlock => c.type === 'tool_use' && c.name === toolName,
       );
-      e.status = res.statusCode;
-      throw e;
-    }
 
-    const parsed = JSON.parse(text) as {
-      content?: Array<{ type: string; input?: unknown; name?: string; text?: string }>;
-      usage?: { input_tokens?: number; output_tokens?: number };
-    };
+      if (!toolUse || toolUse.input === undefined) {
+        // Fall back: maybe the model emitted text instead of using the tool.
+        const textBlock = response.content.find(
+          (c): c is Anthropic.TextBlock => c.type === 'text',
+        );
+        const textContent = textBlock?.text ?? '';
+        const json = tolerantJsonParse(textContent);
+        return {
+          provider: useEmergent ? 'emergent' : 'anthropic',
+          model: args.model,
+          rawText: textContent,
+          parsedJson: json,
+          promptTokens: response.usage?.input_tokens ?? null,
+          completionTokens: response.usage?.output_tokens ?? null,
+          costUsd: null,
+        };
+      }
 
-    const toolUse = parsed.content?.find((c) => c.type === 'tool_use' && c.name === toolName);
-    if (!toolUse || toolUse.input === undefined) {
-      // Fall back: maybe the model emitted text instead of using the tool.
-      const textBlock = parsed.content?.find((c) => c.type === 'text')?.text ?? '';
-      const json = tolerantJsonParse(textBlock);
       return {
         provider: useEmergent ? 'emergent' : 'anthropic',
         model: args.model,
-        rawText: textBlock,
-        parsedJson: json,
-        promptTokens: parsed.usage?.input_tokens ?? null,
-        completionTokens: parsed.usage?.output_tokens ?? null,
+        rawText: JSON.stringify(toolUse.input),
+        parsedJson: toolUse.input,
+        promptTokens: response.usage?.input_tokens ?? null,
+        completionTokens: response.usage?.output_tokens ?? null,
         costUsd: null,
       };
+    } catch (err) {
+      const e = err as Error & { status?: number };
+      if (e instanceof Anthropic.APIError) {
+        const wrapped: Error & { status?: number } = new Error(
+          `Anthropic ${args.model} -> ${e.status}: ${e.message.slice(0, 400)}`,
+        );
+        wrapped.status = e.status;
+        throw wrapped;
+      }
+      throw e;
     }
-
-    return {
-      provider: useEmergent ? 'emergent' : 'anthropic',
-      model: args.model,
-      rawText: JSON.stringify(toolUse.input),
-      parsedJson: toolUse.input,
-      promptTokens: parsed.usage?.input_tokens ?? null,
-      completionTokens: parsed.usage?.output_tokens ?? null,
-      costUsd: null,
-    };
   }
 }
 

@@ -6,6 +6,10 @@ import { Landing } from './pages/Landing.js';
 import { SignIn } from './pages/SignIn.js';
 import { Workspace } from './pages/Workspace.js';
 import { RepairReview } from './pages/RepairReview.js';
+import { Studio } from './pages/Studio.js';
+import { RecruitingDemo } from './components/RecruitingDemo.js';
+import { Guarantees } from './pages/Guarantees.js';
+import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import { OnboardingTour } from './components/OnboardingTour.js';
 
@@ -58,16 +62,22 @@ export function App() {
         return <Workspace />;
       case 'repair-review':
         return <RepairReview />;
+      case 'studio':
+        return <Studio />;
+      case 'demo':
+        return <RecruitingDemo />;
+      case 'guarantees':
+        return <Guarantees />;
       default:
         return <Landing />;
     }
   })();
 
   return (
-    <>
+    <ErrorBoundary name="app-root">
       {page}
       <CommandPalette />
       {view === 'workspace' && <OnboardingTour />}
-    </>
+    </ErrorBoundary>
   );
 }

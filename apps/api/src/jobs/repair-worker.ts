@@ -14,6 +14,8 @@ import { createEmailAutomationService, renderRepairApprovalEmail, toOutboundEmai
 import { appendActivity } from '../stores/activity-store.js';
 import { broadcastToOwner } from '../realtime/socket.js';
 import type { RepairFailureKind } from '@argo/shared-types';
+import { dispatchWebhook } from '../services/webhook-dispatcher.js';
+import { classifyError, renderClassificationAsRepairContext, type ErrorClassification } from '../services/error-intelligence.js';
 
 const router = DefaultLlmRouter.fromEnv();
 const store = new MongoInvocationStore();
@@ -64,6 +66,11 @@ async function detectAndEnqueue() {
       { operationId: op.id, failureKind: 'application_error' as RepairFailureKind },
       { removeOnComplete: 50, removeOnFail: 200 },
     );
+    dispatchWebhook(op.id, 'error.detected', {
+      operationId: op.id,
+      kind: 'http_5xx',
+      count: grp.count,
+    }).catch(() => undefined);
     await db.collection('runtime_events').updateMany(
       { operationId: op.id, kind: 'http_5xx', processedAt: null },
       { $set: { processedAt: new Date().toISOString() } },
@@ -84,6 +91,11 @@ async function detectAndEnqueue() {
         { operationId: op.id, failureKind: 'application_error' as RepairFailureKind, triggerEventId: e.id },
         { removeOnComplete: 50, removeOnFail: 200 },
       );
+      dispatchWebhook(op.id, 'error.detected', {
+        operationId: op.id,
+        kind: 'unhandled_exception',
+        count: 1,
+      }).catch(() => undefined);
     }
     await db.collection('runtime_events').updateOne(
       { _id: e._id },
@@ -151,6 +163,56 @@ export function startRepairWorker() {
         }
       }
 
+      // ── Error Intelligence: classify the error before calling the LLM ──
+      // This narrows the scope of files and gives the LLM a head start.
+      let classification: ErrorClassification | null = null;
+      const triggerEvent = triggerEventId
+        ? await db.collection('runtime_events').findOne({ id: triggerEventId })
+        : null;
+      const recentEvents = await db
+        .collection('runtime_events')
+        .find({ operationId: op.id })
+        .sort({ occurredAt: -1 })
+        .limit(10)
+        .toArray();
+
+      try {
+        classification = classifyError({
+          operationId: op.id,
+          stackTrace: String((triggerEvent as Record<string, unknown> | null)?.stackTrace ?? triggerEventId ?? ''),
+          errorMessage: String((triggerEvent as Record<string, unknown> | null)?.message ?? failureKind),
+          recentEvents: recentEvents.map((e) => ({
+            kind: String((e as Record<string, unknown>).kind ?? ''),
+            message: String((e as Record<string, unknown>).message ?? ''),
+            occurredAt: String((e as Record<string, unknown>).occurredAt ?? ''),
+          })),
+          bundleFiles: persistedFiles,
+        });
+        logger.info({
+          operationId,
+          pattern: classification.pattern,
+          confidence: classification.confidence,
+          autoFixable: classification.autoFixable,
+        }, 'error classified');
+      } catch (err) {
+        logger.warn({ err }, 'error classification failed — proceeding without');
+      }
+
+      // If classification identified specific affected files, narrow the scope
+      // so the LLM only sees relevant code (cheaper, faster, more accurate).
+      const scopedFiles = classification?.affectedFiles.length
+        ? failingFiles.filter((f) =>
+            classification!.affectedFiles.some((af) => f.path.includes(af) || af.includes(f.path)),
+          )
+        : failingFiles;
+      // If scoping removed everything, fall back to all files.
+      const filesToRepair = scopedFiles.length > 0 ? scopedFiles : failingFiles;
+
+      // Build the repair context with classification intelligence.
+      const repairContext = classification
+        ? renderClassificationAsRepairContext(classification)
+        : '';
+
       const proposal = await proposeRepairPatch(router, store, {
         operationId: op.id,
         ownerId: op.ownerId,
@@ -159,8 +221,8 @@ export function startRepairWorker() {
         audience: 'workflow audience',
         outcome: 'workflow outcome',
         failureKind,
-        failingFiles,
-        stackTrace: triggerEventId ?? '',
+        failingFiles: filesToRepair,
+        stackTrace: (repairContext ? repairContext + '\n\n' : '') + (triggerEventId ?? ''),
         requestPayload: {},
         smallerChange,
         recentEvents: [],
@@ -196,6 +258,16 @@ export function startRepairWorker() {
           reason: f.reason,
         })),
         testReport: null,
+        errorClassification: classification ? {
+          pattern: classification.pattern,
+          confidence: classification.confidence,
+          rootCause: classification.rootCause,
+          severity: classification.severity,
+          category: classification.category,
+          autoFixable: classification.autoFixable,
+          affectedFiles: classification.affectedFiles,
+          suggestedFix: classification.suggestedFix,
+        } : null,
         approvalTokenHash: hash,
         approvalEmailedAt: new Date().toISOString(),
         approvedAt: null,
@@ -231,6 +303,13 @@ export function startRepairWorker() {
           rendered,
         }),
       );
+
+      dispatchWebhook(op.id, 'repair.proposed', {
+        repairId: repairDoc.id,
+        operationId: op.id,
+        whatBroke: proposal.data.whatBroke,
+        whatChanged: proposal.data.whatChanged,
+      }).catch(() => undefined);
 
       const a = await appendActivity({
         ownerId: op.ownerId,

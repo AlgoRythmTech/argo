@@ -42,8 +42,15 @@ export class AgentMailService implements EmailAutomationService {
   }
 
   static fromEnv(): AgentMailService {
+    const apiKey = process.env.AGENTMAIL_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        'AGENTMAIL_API_KEY environment variable is required when AgentMail is enabled. ' +
+        'Set AGENTMAIL_ENABLED=false to use Mailpit fallback in development.',
+      );
+    }
     return new AgentMailService({
-      apiKey: process.env.AGENTMAIL_API_KEY ?? '',
+      apiKey,
       fromInboxId: process.env.AGENTMAIL_FROM_ADDRESS ?? 'argoai@agentmail.to',
       inboundWebhookSecret: process.env.AGENTMAIL_INBOUND_WEBHOOK_SECRET ?? '',
       replyDomain: process.env.AGENTMAIL_REPLY_DOMAIN ?? 'agentmail.to',

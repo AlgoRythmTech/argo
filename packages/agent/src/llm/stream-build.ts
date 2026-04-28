@@ -147,13 +147,16 @@ async function* streamOnce(args: StreamOnceArgs): AsyncGenerator<StreamBuildChun
   }
   messages.push({ role: 'user', content: args.userPrompt });
 
-  const body = {
+  // GPT-5.5 does not support the temperature parameter — omit it for
+  // 5.5-family models. Other models use 0.2 for deterministic code output.
+  const isGpt55 = args.model.startsWith('gpt-5.5');
+  const body: Record<string, unknown> = {
     model: args.model,
     messages,
     stream: true,
-    max_tokens: args.maxTokens,
-    temperature: 0.2, // Low — code generation is not creative writing.
+    max_completion_tokens: args.maxTokens,
   };
+  if (!isGpt55) body.temperature = 0.2;
 
   const res = await request(`${args.apiBase}/chat/completions`, {
     method: 'POST',

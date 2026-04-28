@@ -1,141 +1,188 @@
-# Argo — AI Business Operator
+# Argo — Never Ship Broken Workflows
 
-> Describe the workflow once. Argo runs it. Reply to email when it asks.
+> The first AI that refuses to ship changes that break what already works.
 
-Argo operates the business workflows of solo service operators (recruiters,
-consultants, property managers, coaches). It is **not** an app builder. It is
-the operating layer that runs the app forever, with email as the only control
-surface the customer ever needs.
+Argo runs business workflows end-to-end for non-technical operators. Describe your workflow in one sentence, answer 3 click-through questions, and get a live URL in 90 seconds. Every change passes 49 quality checks, 15 security scans, auto-generated regression tests, and human approval gates before it touches your customers.
+
+**One-liner for YC:** Argo runs candidate intake for recruiting agencies end-to-end and refuses to ship changes that break what already works.
+
+## What makes Argo different
+
+| | Replit | Lovable | Emergent | **Argo** |
+|---|---|---|---|---|
+| Target user | Developers | Non-tech founders | Founders | **Non-tech business operators** |
+| Core promise | AI pair programmer | Text-to-UI | Full-stack vibe coding | **Never-ship-broken workflows** |
+| Regression testing | No | No | No | **Auto-generated, runs before every deploy** |
+| Security scanning | No | No | No | **15 categories, every deploy** |
+| Quality gate | No | No | No | **49 checks, every deploy** |
+| Human approval gates | No | No | No | **Built-in, email-based** |
+| Self-healing | No | No | No | **Detects errors, proposes fix, waits for approval** |
+| Iterate without regression | No | No | No | **Baseline tests before every change** |
+| Agent builder | No | No | No | **OpenClaw-based, deploy to sandboxes** |
 
 ## Quick start
 
-### Option A — Docker (single command, recommended)
+### Docker (recommended)
 
 ```bash
-cp .env.example .env.local                # then edit and add your API keys
+cp .env.example .env.local                # add your API keys
 docker compose up -d                       # postgres + mongo + redis + mailpit + api
-docker compose exec api pnpm --filter @argo/api db:deploy   # run migrations once
-pnpm install && pnpm --filter @argo/web dev   # web on localhost:5173
+docker compose exec api pnpm db:deploy     # run migrations
+pnpm install && pnpm dev                   # web on :5173, api on :4000
 ```
 
-See [QUICKSTART.md](./QUICKSTART.md) for the full walkthrough including the
-"backend on one laptop, frontend on another" setup.
-
-### Option B — Native dev stack
+### Native dev stack
 
 ```bash
-# 1. Copy env template and fill in real keys (rotated, never committed)
 cp .env.example .env.local
-
-# 2. Install dependencies
 pnpm install
-
-# 3. Bring up dev infrastructure (postgres + mongo + redis + mailpit)
-pnpm infra:up
-
-# 4. Generate Prisma client and run migrations
-pnpm db:generate
-pnpm db:migrate
-
-# 5. Run web + api in parallel
-pnpm dev
+pnpm infra:up          # postgres + mongo + redis + mailpit
+pnpm db:generate && pnpm db:migrate
+pnpm dev               # parallel web + api
 ```
 
-Then:
+| Surface | URL |
+|---------|-----|
+| Web (Vite) | http://localhost:5173 |
+| API (Fastify) | http://localhost:4000 |
+| Mailpit UI | http://localhost:8025 |
 
-| Surface         | URL                       |
-| --------------- | ------------------------- |
-| Web (Vite)      | http://localhost:5173     |
-| API (Fastify)   | http://localhost:4000     |
-| API health      | http://localhost:4000/health |
-| Mailpit UI      | http://localhost:8025     |
-| Postgres        | postgresql://argo:argo@localhost:5432/argo |
-| MongoDB         | mongodb://argo:argo@localhost:27017/argo   |
-| Redis           | redis://localhost:6379    |
-
-## Monorepo layout
+## Architecture
 
 ```
 argo/
 ├── apps/
-│   ├── web/                       React 18 + Vite + TS dashboard
-│   └── api/                       Fastify + Prisma + BullMQ
+│   ├── web/                  React 18 + Vite + Tailwind (32 components, 5 pages)
+│   └── api/                  Fastify + Prisma + BullMQ (29 API routes)
 ├── packages/
-│   ├── shared-types/              Zod schemas (single source of truth)
-│   ├── security/                  Escape, PII redaction, allow-list, rate limiters
-│   ├── workspace-runtime/         IExecutionProvider + Blaxel + Docker mock
-│   ├── email-automation/          EmailAutomationService + AgentMail + Mailpit
-│   ├── agent/                     State machine, context envelope, LLM router
-│   └── build-engine/              Code generator (Open Lovable inspired)
-├── infra/
-│   └── docker/                    docker-compose.dev.yml + mongo init
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── EMAIL_DOCTRINE.md
-│   ├── SECURITY.md
-│   ├── RUNBOOK.md
-│   └── BLOCKERS.md
-└── licenses/                      Upstream license files (Apache-2.0, MIT)
+│   ├── agent/                LLM router + OpenClaw skills + tools (OpenAI/Anthropic)
+│   ├── build-engine/         Code generation + quality gate + security scanner
+│   ├── workspace-runtime/    Blaxel sandbox deployment + Docker mock
+│   ├── email-automation/     AgentMail + Mailpit + inbound parsing
+│   ├── security/             Rate limiting + trust ratchet + PII redaction
+│   └── shared-types/         Zod schemas (single source of truth)
+└── infra/                    Docker Compose + Mongo init
 ```
 
-## The locked stack
+### The Build Pipeline (7 stages)
 
-| Layer        | Choice                                       |
-| ------------ | -------------------------------------------- |
-| Execution    | **Blaxel** (one operation per environment)   |
-| Email        | **AgentMail** (inbound + outbound)           |
-| Build engine | Open Lovable fork (Apache-2.0)               |
-| Test sandbox | E2B                                          |
-| LLM (agent)  | OpenAI gpt-5.5 (primary), Claude (build)     |
-| Backend      | Node 20 + TS + Fastify + Prisma + BullMQ     |
-| DB (rel)     | Postgres 16                                   |
-| DB (gen code)| MongoDB 7                                    |
-| Cache/queue  | Redis 7                                      |
-| Frontend     | React 18 + Vite + TS + Tailwind + React Flow |
-| Auth         | Magic link only (no passwords, ever)         |
+```
+Stream → Parse → Quality Gate (49 checks) → NPM Validate → Security Scan (15 categories)
+  → Test Suite (auto-generated) → Deploy (Blaxel sandbox)
+```
 
-## The doctrine
+Every stage must pass. If any stage fails, the deploy is blocked. No exceptions.
+
+### Agent Builder + Sandbox Allocation
+
+Argo includes a visual agent builder powered by OpenClaw skills:
+
+- **PicoClaw mode** (<10 MB RAM): Stateless agents like email classifiers, lead qualifiers
+- **Full agent mode** (2-4 GB RAM): Multi-step agents with database, web, and approval tools
+- **Free tier**: 2 GB RAM per agent in shared 4 GB sandbox (2 agents per sandbox)
+- **Paid tier**: Dedicated 4 GB sandbox per agent
+
+Agents deploy to Blaxel sandboxes with:
+- Auto-generated SKILL.md (OpenClaw format)
+- Runtime harness with health monitoring
+- Webhook/cron/form triggers
+- LLM routing (GPT-5.5 / Claude Opus / Claude Sonnet)
+
+### Key Features
+
+**For Operators (non-technical)**
+- Studio: conversational builder (type one sentence → click 3 options → live app)
+- Live form preview: real interactive forms, not mockups
+- Conversational iteration: "Make the rejection email warmer" → safety checks → approve
+- ROI dashboard: hours saved, cost savings, response time improvements
+- Email-based operation: approve/reject from your inbox, never open the dashboard
+
+**For Trust (the moat)**
+- 49-check quality gate before every deploy
+- 15-category security scanner
+- Auto-generated regression tests
+- Human approval gates for customer-facing actions
+- Self-healing: detects errors → diagnoses → proposes fix → waits for approval
+- Iterate without regression: baseline tests before every change
+
+**For Developers (if they look)**
+- Full code viewer with syntax highlighting and bundle search
+- Diff viewer between any two versions
+- Pipeline visualization (7 stages, animated)
+- Agent invocation replay with PII-redacted envelopes
+- Guardrails dashboard (safety score, test results, scan findings)
+
+## The Stack
+
+| Layer | Choice |
+|-------|--------|
+| Execution | Blaxel sandboxes (per-operation isolation) |
+| Email | AgentMail (production) / Mailpit (dev) |
+| Build engine | Open Lovable fork (Apache-2.0) |
+| Agent framework | OpenClaw skills + PicoClaw lightweight mode |
+| LLM | GPT-5.5 (primary), Claude Opus 4.7 (build), Claude Sonnet 4.6 (fast) |
+| Backend | Node 20 + TypeScript + Fastify + Prisma + BullMQ |
+| Database | Postgres 16 (metadata) + MongoDB 7 (bundles, invocations) |
+| Cache/Queue | Redis 7 (rate limits, BullMQ, Socket.io adapter) |
+| Frontend | React 18 + Vite + Tailwind + Framer Motion |
+| Auth | Magic link only (no passwords) |
+
+## API Routes (29)
+
+**Core**: health, auth (magic-link, session), operations (CRUD)
+**Builder**: builder (start, submit-answers), scoping (workflow map editor)
+**Deploy**: deploy (7-stage pipeline), build-stream (real-time progress)
+**Safety**: guardrails (safety score, scans, tests), pipeline (stage status)
+**Agents**: agent-builder (CRUD, templates, test, deploy), pool-stats
+**Analytics**: analytics (overview, per-operation), roi (hours saved, cost savings)
+**Studio**: detect (workflow type), build (from answers), simulate (test submission)
+**Operations**: iterate (with regression), rollback, env-vars, logs, webhooks
+**User**: notifications, memory, chat, billing, templates, status-page, replay
+
+## Tests
+
+```bash
+pnpm test    # 259 tests across 6 packages, all passing
+```
+
+| Package | Tests |
+|---------|-------|
+| @argo/agent | 135 |
+| @argo/build-engine | 75 |
+| @argo/security | 21 |
+| apps/api | 21 |
+| @argo/shared-types | 3 |
+| @argo/email-automation | 4 |
+
+## Numbers
+
+| Metric | Count |
+|--------|-------|
+| Source files | 267 |
+| API routes | 33 |
+| Web components | 32 |
+| Web pages | 5 |
+| Templates | 10 |
+| Quality checks | 49 |
+| Security scan categories | 15 |
+| Agent tools | 15 |
+| Agent templates | 6 |
+| Tests passing | 259 |
+| TypeScript errors | 0 |
+
+## The Doctrine
 
 1. **Maya is the customer.** Every feature must make her Monday morning shorter.
-2. **Email is the interface.** The dashboard exists for setup and monthly check-in. Nothing else.
-3. **Trust ratchet is hard-coded.** First 10 sends per template require approval; opt-in unlocks at 95% approval rate.
-4. **The agent is not the runtime.** Agents generate and repair; deterministic code runs.
-5. **Security defaults are constants, not toggles.** RLS on, secrets in env, signatures verified, output escaped, packages allow-listed.
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system map.
-
-## Phase status
-
-| Phase | Description                  | Status |
-| ----- | ---------------------------- | ------ |
-| 0     | Customer development         | DEFERRED (founder override; see [docs/PIVOT.md](docs/PIVOT.md)) |
-| 1     | Manual operations            | DEFERRED (founder override) |
-| 2     | Bootstrap & auth             | DONE — magic link + dashboard shell + React Flow |
-| 3     | Workflow builder & agent core| DONE — three-question dialogue + Zod-validated map + WS updates |
-| 4     | Build, test, deploy          | DONE — generator + validator + IExecutionProvider deploy + live URL |
-| 5     | Email automation             | DONE — locked templates + token approvals + AgentMail/Mailpit |
-| 6     | Self-healing                 | DONE — observability sidecar + repair worker + trust ratchet |
-| 7     | Polish & demo day readiness  | PENDING — landing copy + 60s video + third-party security audit |
-| 8     | Scale to 30                  | PENDING — referral loop + Indie Hackers essay |
-
-## Documentation
-
-- [docs/PIVOT.md](docs/PIVOT.md) — build-time decisions and overrides
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system map
-- [docs/SECURITY.md](docs/SECURITY.md) — security defaults
-- [docs/EMAIL_DOCTRINE.md](docs/EMAIL_DOCTRINE.md) — Section 8 codified
-- [docs/RUNBOOK.md](docs/RUNBOOK.md) — local dev walkthrough
-- [docs/BLOCKERS.md](docs/BLOCKERS.md) — known unknowns
-- [docs/UPSTREAM.md](docs/UPSTREAM.md) — what we cloned and what we borrowed
+2. **Never ship broken.** 49 quality checks + 15 security scans + regression tests before every deploy.
+3. **Email is the interface.** The dashboard exists for setup. Everything else happens from email.
+4. **Trust ratchet is non-negotiable.** First 10 sends per template require approval; unlocks at 95%.
+5. **The agent is not the runtime.** Agents generate and repair; deterministic code runs.
+6. **Iterate without regression.** Baseline tests before every change, block if anything breaks.
 
 ## License
 
-Argo source is © AlgoRythmTech. Forked components retain their upstream
-licenses; see `/licenses/` for the canonical files.
+Argo source is (c) AlgoRythmTech. Forked components retain their upstream licenses (see `/licenses/`).
 
 ## Attribution
 
-Argo's BUILDING-phase code generator stands on the shoulders of the open-source
-vibe-coding community — most directly Open Lovable (Apache-2.0). Patterns for
-human-in-the-loop approvals borrow from Cline (Apache-2.0). Prior art for the
-agent event taxonomy comes from OpenHands (MIT).
+Built on: Open Lovable (Apache-2.0), OpenClaw (MIT), Cline (Apache-2.0), OpenHands (MIT).

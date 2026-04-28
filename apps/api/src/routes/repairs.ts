@@ -8,6 +8,8 @@ import { requireSession } from '../plugins/auth-plugin.js';
 import { appendActivity } from '../stores/activity-store.js';
 import { broadcastToOwner } from '../realtime/socket.js';
 import { logger } from '../logger.js';
+import { executeApprovedRepair } from '../services/repair-deployer.js';
+import { dispatchWebhook } from '../services/webhook-dispatcher.js';
 
 export async function registerRepairsRoutes(app: FastifyInstance) {
   app.get('/api/repairs', async (request, reply) => {
@@ -90,7 +92,18 @@ export async function registerRepairsRoutes(app: FastifyInstance) {
       }
     }
 
+    dispatchWebhook(String(repair.operationId), 'approval.granted', {
+      repairId: id,
+      operationId: String(repair.operationId),
+    }).catch(() => undefined);
+
     logger.info({ repairId: id }, 'repair approved via email link');
+
+    // Fire-and-forget: deploy the patched bundle to production.
+    // The function handles its own errors (marks repair as deploy_failed).
+    executeApprovedRepair(id).catch((err) =>
+      logger.error({ err, repairId: id }, 'executeApprovedRepair top-level error'),
+    );
 
     return reply.type('text/html').send(htmlOk());
   });
@@ -163,6 +176,23 @@ export async function registerRepairsRoutes(app: FastifyInstance) {
           tags: ['repair-approved', 'workspace', failureKind],
         }).catch(() => undefined);
       }
+    }
+
+    if (decision === 'approve') {
+      dispatchWebhook(op.id, 'approval.granted', {
+        repairId: id,
+        operationId: op.id,
+      }).catch(() => undefined);
+
+      // Fire-and-forget: deploy the patched bundle to production.
+      executeApprovedRepair(id).catch((err) =>
+        logger.error({ err, repairId: id }, 'executeApprovedRepair top-level error'),
+      );
+    } else {
+      dispatchWebhook(op.id, 'approval.declined', {
+        repairId: id,
+        operationId: op.id,
+      }).catch(() => undefined);
     }
 
     logger.info({ repairId: id, decision, userId: session.userId }, 'repair decision via workspace');

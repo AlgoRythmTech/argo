@@ -6,6 +6,8 @@ import {
   generateTestSuite,
   runAutoFixLoop,
   runQualityGate,
+  runSecurityScan,
+  generateTestSuiteForBundle,
   type AutoFixCycleEvent,
 } from '@argo/build-engine';
 import {
@@ -27,6 +29,8 @@ import { requireSession } from '../plugins/auth-plugin.js';
 import { appendActivity } from '../stores/activity-store.js';
 import { broadcastToOwner } from '../realtime/socket.js';
 import { logger } from '../logger.js';
+import { loadEnvOverrides } from './env-vars.js';
+import { dispatchWebhook } from '../services/webhook-dispatcher.js';
 
 const DeployBody = z.object({
   operationId: z.string(),
@@ -202,6 +206,13 @@ export async function registerDeployRoutes(app: FastifyInstance) {
       })),
       generatedByModel,
       aiCycles,
+      // Audit trail: security scan + test suite summary.
+      securityScan: (() => {
+        try { const r = runSecurityScan(bundle); return { passed: r.passed, riskScore: r.riskScore, counts: r.counts, findingCount: r.findings.length }; } catch { return null; }
+      })(),
+      testSuiteSummary: (() => {
+        try { const s = generateTestSuiteForBundle(bundle); return s.summary; } catch { return null; }
+      })(),
       createdAt: new Date().toISOString(),
     });
 
@@ -226,6 +237,10 @@ export async function registerDeployRoutes(app: FastifyInstance) {
     await getPrisma().operation.update({ where: { id: op.id }, data: { status: 'deploying' } });
     broadcastToOwner(session.userId, { type: 'operation_status', operationId: op.id, status: 'deploying' });
 
+    // Load user-defined env vars and merge them (user vars take precedence
+    // over system defaults so operators can override connection strings etc.).
+    const userEnv = await loadEnvOverrides(op.id, session.userId);
+
     let handle;
     try {
       handle = await executionProvider.deploy({
@@ -237,6 +252,7 @@ export async function registerDeployRoutes(app: FastifyInstance) {
           INTERNAL_API_KEY: process.env.INTERNAL_API_KEY ?? '',
           MONGODB_URI: process.env.MONGODB_URI ?? '',
           MONGODB_DB: `argo_op_${op.id}`,
+          ...userEnv,
         },
         onProgress: (evt) => {
           broadcastToOwner(session.userId, { type: 'deploy_progress', operationId: op.id, evt });
@@ -330,6 +346,13 @@ export async function registerDeployRoutes(app: FastifyInstance) {
     });
     broadcastToOwner(session.userId, { type: 'activity', payload: activity });
     broadcastToOwner(session.userId, { type: 'operation_status', operationId: op.id, status: 'running' });
+
+    dispatchWebhook(op.id, 'deploy.completed', {
+      operationId: op.id,
+      bundleVersion,
+      publicUrl: handle.publicUrl,
+      model: generatedByModel,
+    }).catch(() => undefined);
 
     return reply.send({
       ok: true,

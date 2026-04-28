@@ -87,7 +87,7 @@ export function decideApprovalGate(
   }
 
   return {
-    approvalRequired: !template.approvalRequired ? false : false,
+    approvalRequired: false,
     reason: 'opt_in_unlocked',
     sendsToDate: sends,
     approvalsToDate: approvals,
