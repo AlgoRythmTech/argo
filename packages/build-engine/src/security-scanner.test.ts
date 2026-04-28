@@ -44,7 +44,7 @@ describe('security-scanner', () => {
 
   it('detects hardcoded Stripe keys', () => {
     const bundle = makeBundle([
-      { path: 'config.js', contents: 'const stripeKey = "sk_live_FAKE_TEST_KEY_NOT_REAL";' },
+      { path: 'config.js', contents: 'const stripeKey = "sk_live_00000000000000000000";' },
     ]);
     const report = runSecurityScan(bundle);
     expect(report.findings.some((f) => f.category === 'hardcoded_secret')).toBe(true);
@@ -52,7 +52,7 @@ describe('security-scanner', () => {
 
   it('detects multiple issues in one file', () => {
     const bundle = makeBundle([
-      { path: 'bad.js', contents: 'const key = "sk_live_FAKE_TEST_KEY_NOT_REAL";\neval(userInput);' },
+      { path: 'bad.js', contents: 'const key = "sk_live_00000000000000000000";\neval(userInput);' },
     ]);
     const report = runSecurityScan(bundle);
     expect(report.findings.length).toBeGreaterThanOrEqual(1);
