@@ -18,6 +18,9 @@ import {
   Tablet,
   Terminal,
   Zap,
+  Download,
+  Globe,
+  MessageCircle,
 } from 'lucide-react';
 import { operations, type GeneratedBundle, type Operation, type PreviewAction } from '../api/client.js';
 import { CodeViewer } from './CodeViewer.js';
@@ -33,10 +36,14 @@ import { WorkflowAutomation } from './WorkflowAutomation.js';
 import { PipelineVisualization } from './PipelineVisualization.js';
 import { GuardrailsDashboard } from './GuardrailsDashboard.js';
 import { DataBrowser } from './DataBrowser.js';
+import { CodeExport } from './CodeExport.js';
+import { DomainManager } from './DomainManager.js';
+import { ConversationalIterate } from './ConversationalIterate.js';
+import { VersionTimeline } from './VersionTimeline.js';
 import { ErrorBoundary } from './ErrorBoundary.js';
 import { cn } from '../lib/utils.js';
 
-export type PreviewTab = 'preview' | 'code' | 'diff' | 'replay' | 'inbox' | 'memory' | 'env' | 'logs' | 'iterate' | 'workflow' | 'pipeline' | 'guardrails' | 'data' | 'export' | 'domains';
+export type PreviewTab = 'preview' | 'code' | 'diff' | 'replay' | 'inbox' | 'memory' | 'env' | 'logs' | 'iterate' | 'workflow' | 'pipeline' | 'guardrails' | 'data' | 'export' | 'domains' | 'chat-iterate' | 'versions';
 
 interface PreviewPaneProps {
   operation: Operation | null;
@@ -169,6 +176,15 @@ export function PreviewPane({ operation, onAskArgo }: PreviewPaneProps) {
           </TabButton>
           <TabButton active={tab === 'data'} onClick={() => setTab('data')} icon={<Inbox className="h-3.5 w-3.5" />}>
             Data
+          </TabButton>
+          <TabButton active={tab === 'export'} onClick={() => setTab('export')} icon={<Download className="h-3.5 w-3.5" />}>
+            Export
+          </TabButton>
+          <TabButton active={tab === 'domains'} onClick={() => setTab('domains')} icon={<Globe className="h-3.5 w-3.5" />}>
+            Domains
+          </TabButton>
+          <TabButton active={tab === 'chat-iterate'} onClick={() => setTab('chat-iterate')} icon={<MessageCircle className="h-3.5 w-3.5" />}>
+            Chat
           </TabButton>
         </div>
         {tab === 'preview' && (
@@ -363,6 +379,45 @@ export function PreviewPane({ operation, onAskArgo }: PreviewPaneProps) {
             >
               <ErrorBoundary name="data-browser">
                 <DataBrowser operationId={operation.id} />
+              </ErrorBoundary>
+            </motion.div>
+          ) : tab === 'export' ? (
+            <motion.div
+              key="export"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0 overflow-y-auto"
+            >
+              <ErrorBoundary name="code-export">
+                <CodeExport operationId={operation.id} operationName={operation.name} />
+              </ErrorBoundary>
+            </motion.div>
+          ) : tab === 'domains' ? (
+            <motion.div
+              key="domains"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0 overflow-y-auto"
+            >
+              <ErrorBoundary name="domain-manager">
+                <DomainManager operationId={operation.id} />
+              </ErrorBoundary>
+            </motion.div>
+          ) : tab === 'chat-iterate' ? (
+            <motion.div
+              key="chat-iterate"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0"
+            >
+              <ErrorBoundary name="conversational-iterate">
+                <ConversationalIterate operationId={operation.id} operationName={operation.name} />
               </ErrorBoundary>
             </motion.div>
           ) : (

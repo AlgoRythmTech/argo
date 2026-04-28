@@ -115,7 +115,7 @@ function generateId(): string {
 
 /** Simulated synthesized product — in production this calls the AI pipeline. */
 function buildMockProduct(ideas: Idea[]): SynthesizedProduct {
-  const bestIdea = ideas[0];
+  const bestIdea = ideas[0]!;
   const allAudiences = ideas.map((i) => i.targetAudience).join(', ');
   return {
     name: ideas.length === 1
@@ -264,7 +264,7 @@ export function StartupLab() {
     for (let i = 0; i < SYNTHESIS_STEPS.length; i++) {
       if (synthAbort.current) return;
       setCurrentStep(i);
-      await new Promise((r) => setTimeout(r, SYNTHESIS_STEPS[i].duration));
+      await new Promise((r) => setTimeout(r, SYNTHESIS_STEPS[i]!.duration));
     }
 
     if (synthAbort.current) return;

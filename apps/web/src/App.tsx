@@ -9,6 +9,7 @@ import { RepairReview } from './pages/RepairReview.js';
 import { Studio } from './pages/Studio.js';
 import { RecruitingDemo } from './components/RecruitingDemo.js';
 import { Guarantees } from './pages/Guarantees.js';
+import { StartupLab } from './components/StartupLab.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import { OnboardingTour } from './components/OnboardingTour.js';
@@ -68,6 +69,8 @@ export function App() {
         return <RecruitingDemo />;
       case 'guarantees':
         return <Guarantees />;
+      case 'startup-lab':
+        return <StartupLab />;
       default:
         return <Landing />;
     }

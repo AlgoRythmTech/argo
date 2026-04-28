@@ -33,6 +33,8 @@ import { GuardrailsDashboard } from '../components/GuardrailsDashboard.js';
 import { ROIDashboard } from '../components/ROIDashboard.js';
 import { AgentBuilder } from '../components/AgentBuilder.js';
 import { PipelineVisualization } from '../components/PipelineVisualization.js';
+import { CreditShield } from '../components/CreditShield.js';
+import { UsageDashboard } from '../components/UsageDashboard.js';
 import { ErrorBoundary } from '../components/ErrorBoundary.js';
 import { cn } from '../lib/utils.js';
 
@@ -71,7 +73,7 @@ export function Workspace() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showTemplateGallery, setShowTemplateGallery] = useState(false);
   const [activeBuildPrompt, setActiveBuildPrompt] = useState<string | null>(null);
-  const [rightPanel, setRightPanel] = useState<'activity' | 'chat' | 'analytics' | 'guardrails' | 'roi' | 'agents'>('activity');
+  const [rightPanel, setRightPanel] = useState<'activity' | 'chat' | 'analytics' | 'guardrails' | 'roi' | 'agents' | 'usage'>('activity');
 
   const activeOp = useMemo(() => ops.find((o) => o.id === activeId) ?? null, [ops, activeId]);
 
@@ -287,6 +289,7 @@ export function Workspace() {
             </div>
             {activeOp && <HealthBadge operationId={activeOp.id} />}
             {activeOp && <SpendBadge operationId={activeOp.id} />}
+            <CreditShield compact />
             {activeOp && <OperationReadmeButton operationId={activeOp.id} />}
             {activeOp && <EmailPreviewModal {...(activeOp.name ? { operationName: activeOp.name } : {})} />}
           </div>
@@ -390,6 +393,7 @@ export function Workspace() {
             { key: 'guardrails' as const, icon: <Shield className="h-3.5 w-3.5" />, label: 'Guards' },
             { key: 'roi' as const, icon: <DollarSign className="h-3.5 w-3.5" />, label: 'ROI' },
             { key: 'agents' as const, icon: <Bot className="h-3.5 w-3.5" />, label: 'Agents' },
+            { key: 'usage' as const, icon: <DollarSign className="h-3.5 w-3.5" />, label: 'Usage' },
             { key: 'analytics' as const, icon: <BarChart3 className="h-3.5 w-3.5" />, label: 'Stats' },
           ]).map((tab) => (
             <button
@@ -466,6 +470,14 @@ export function Workspace() {
           <ErrorBoundary name="agents">
             <div className="flex-1 overflow-y-auto">
               <AgentBuilder operationId={activeOp?.id} />
+            </div>
+          </ErrorBoundary>
+        )}
+
+        {rightPanel === 'usage' && (
+          <ErrorBoundary name="usage">
+            <div className="flex-1 overflow-y-auto">
+              <UsageDashboard />
             </div>
           </ErrorBoundary>
         )}
