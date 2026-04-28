@@ -145,16 +145,17 @@ async function callJson({ apiBase, apiKey, model, args }: CallJsonArgs): Promise
     (deps ? `Dependencies installed: ${deps}\n\n` : '') +
     `Write the README JSON now.`;
 
-  const body = {
+  const isGpt55 = model.startsWith('gpt-5.5');
+  const body: Record<string, unknown> = {
     model,
     response_format: { type: 'json_object' as const },
-    temperature: 0.4,
-    max_tokens: 2000,
+    max_completion_tokens: 2000,
     messages: [
       { role: 'system' as const, content: README_SYSTEM_PROMPT },
       { role: 'user' as const, content: userMsg },
     ],
   };
+  if (!isGpt55) body.temperature = 0.4;
 
   const res = await request(`${apiBase}/chat/completions`, {
     method: 'POST',

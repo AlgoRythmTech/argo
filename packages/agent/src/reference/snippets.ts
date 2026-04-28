@@ -2091,11 +2091,12 @@ async function callOnce({ spec, input, model, ctx }) {
   if (!apiKey) throw new Error('OPENAI_API_KEY not set');
   const apiBase = process.env.OPENAI_API_BASE ?? 'https://api.openai.com/v1';
   const userPrompt = typeof input === 'string' ? input : JSON.stringify(input);
+  const isGpt55 = model.startsWith('gpt-5.5');
   const body = {
     model,
     response_format: { type: 'json_object' },
-    temperature: spec.temperature,
-    max_tokens: spec.maxTokens,
+    ...(isGpt55 ? {} : { temperature: spec.temperature }),
+    max_completion_tokens: spec.maxTokens,
     messages: [
       { role: 'system', content: spec.systemPrompt + '\\n\\nReturn ONLY a JSON object.' },
       { role: 'user', content: userPrompt },
@@ -2804,7 +2805,7 @@ async function callModel(systemPrompt, userInput) {
     method: 'POST',
     headers: { authorization: 'Bearer ' + API_KEY, 'content-type': 'application/json' },
     body: JSON.stringify({
-      model: MODEL, temperature: 0.2, max_tokens: 800,
+      model: MODEL, ...(MODEL.startsWith('gpt-5.5') ? {} : { temperature: 0.2 }), max_completion_tokens: 800,
       messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userInput }],
     }),
     bodyTimeout: 60_000,
@@ -2820,7 +2821,7 @@ async function judge(input, responseA, responseB) {
     headers: { authorization: 'Bearer ' + API_KEY, 'content-type': 'application/json' },
     body: JSON.stringify({
       model: JUDGE_MODEL, response_format: { type: 'json_object' },
-      temperature: 0, max_tokens: 200,
+      ...(JUDGE_MODEL.startsWith('gpt-5.5') ? {} : { temperature: 0 }), max_completion_tokens: 200,
       messages: [
         { role: 'system', content: JUDGE_SYSTEM },
         { role: 'user', content: 'User input:\\n"""' + input + '"""\\n\\nResponse A:\\n"""' + responseA + '"""\\n\\nResponse B:\\n"""' + responseB + '"""\\n\\nReturn the JSON now.' },

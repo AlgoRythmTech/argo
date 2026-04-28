@@ -347,16 +347,19 @@ interface CallJsonArgs {
 }
 
 async function callJson(args: CallJsonArgs): Promise<unknown> {
-  const body = {
+  // GPT-5.5 requires max_completion_tokens (not max_tokens) and does not
+  // support temperature values other than the default (1).
+  const isGpt55 = args.model.startsWith('gpt-5.5');
+  const body: Record<string, unknown> = {
     model: args.model,
     response_format: { type: 'json_object' as const },
-    temperature: 0.3,
-    max_tokens: args.maxTokens ?? 4000,
+    max_completion_tokens: args.maxTokens ?? 4000,
     messages: [
       { role: 'system' as const, content: args.system },
       { role: 'user' as const, content: args.user },
     ],
   };
+  if (!isGpt55) body.temperature = 0.3;
   const res = await request(`${args.apiBase}/chat/completions`, {
     method: 'POST',
     headers: {

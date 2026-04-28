@@ -276,11 +276,11 @@ async function callJson(args: CallJsonArgs): Promise<unknown> {
     2,
   );
 
-  const body = {
+  const isGpt55 = args.model.startsWith('gpt-5.5');
+  const body: Record<string, unknown> = {
     model: args.model,
     response_format: { type: 'json_object' as const },
-    temperature: 0.3,
-    max_tokens: 1800,
+    max_completion_tokens: 1800,
     messages: [
       { role: 'system' as const, content: FOLLOWUP_SYSTEM_PROMPT },
       {
@@ -294,6 +294,7 @@ async function callJson(args: CallJsonArgs): Promise<unknown> {
       },
     ],
   };
+  if (!isGpt55) body.temperature = 0.3;
 
   const res = await request(`${args.apiBase}/chat/completions`, {
     method: 'POST',

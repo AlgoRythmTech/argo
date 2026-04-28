@@ -19,6 +19,7 @@ import {
 import { validateDependencies, renderDependencyFailures, type DependencyValidationResult } from './npm-validator.js';
 import { runSecurityScan, renderSecurityReportAsAutoFixPrompt, type SecurityScanReport } from './security-scanner.js';
 import { generateTestSuiteForBundle, type GeneratedTestSuite } from './test-suite-generator.js';
+import { runVerifier, renderVerifierAsAutoFixPrompt, type VerifierReport } from './verifier-agent.js';
 
 export interface AutoFixArgs {
   specialist: Specialist;
@@ -113,6 +114,7 @@ export type AutoFixCycleEvent =
   | { kind: 'test_suite_generated'; cycle: number; suite: GeneratedTestSuite['summary'] }
   | { kind: 'testing_run'; cycle: number; report: TestingReport }
   | { kind: 'reviewer_run'; cycle: number; report: ReviewReport }
+  | { kind: 'verifier_run'; cycle: number; report: VerifierReport }
   | { kind: 'cycle_complete'; cycle: number; passed: boolean }
   | { kind: 'aborted' };
 
@@ -325,6 +327,26 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
       }
     }
 
+    // Verifier agent: runs AFTER security scan, catches AI slop, missing
+    // files, broken imports, incomplete implementations, and other issues
+    // the quality gate's regex checks miss. This is Argo's "second pair
+    // of eyes" — inspired by Replit Agent 4's Verifier.
+    let verifierReport: VerifierReport | null = null;
+    if (
+      report.passed &&
+      (npmResult == null || npmResult.allValid) &&
+      (securityReport == null || securityReport.passed)
+    ) {
+      try {
+        verifierReport = runVerifier(bundle);
+        const verifyEvt: AutoFixCycleEvent = { kind: 'verifier_run', cycle, report: verifierReport };
+        history.push(verifyEvt);
+        args.onCycle?.(verifyEvt);
+      } catch (err) {
+        console.warn('[auto-fix-loop] verifier crashed:', String(err).slice(0, 200));
+      }
+    }
+
     // Test suite generation: inject auto-generated tests into the bundle
     // so the testing agent can run them. This happens before runtime
     // testing so the generated tests are exercised as part of the boot.
@@ -414,6 +436,7 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
       report.passed &&
       (npmResult == null || npmResult.allValid) &&
       (securityReport == null || securityReport.passed) &&
+      (verifierReport == null || verifierReport.passed) &&
       (testingReport == null || testingReport.passed) &&
       (reviewReport == null || reviewReport.passed);
     const completeEvt: AutoFixCycleEvent = {
@@ -452,6 +475,9 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
       ...(securityReport && !securityReport.passed
         ? { securityReport: renderSecurityReportAsAutoFixPrompt(securityReport) }
         : {}),
+      ...(verifierReport && !verifierReport.passed
+        ? { verifierReport: renderVerifierAsAutoFixPrompt(verifierReport) }
+        : {}),
       ...(reviewReport && !reviewReport.passed
         ? { reviewerReport: renderReviewAsAutoFixPrompt(reviewReport) }
         : {}),
@@ -483,6 +509,8 @@ function composeRetryPrompt(args: {
   runtimeReport?: string;
   /** Optional security scan report when vulnerabilities were found. */
   securityReport?: string;
+  /** Optional verifier report when the verifier agent caught issues. */
+  verifierReport?: string;
   /** Optional reviewer report when multi-agent mode caught issues. */
   reviewerReport?: string;
   /** Optional npm validation report when packages were hallucinated. */
@@ -505,6 +533,12 @@ function composeRetryPrompt(args: {
   }
   if (args.npmReport) {
     lines.push(args.npmReport);
+    lines.push('');
+  }
+  if (args.verifierReport) {
+    lines.push('## Verifier findings');
+    lines.push('');
+    lines.push(args.verifierReport);
     lines.push('');
   }
   if (args.securityReport) {

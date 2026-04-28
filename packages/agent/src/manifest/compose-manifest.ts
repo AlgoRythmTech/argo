@@ -472,19 +472,21 @@ export async function composeManifestProse(args: ComposeManifestProseArgs): Prom
 
   for (const model of candidates) {
     try {
+      const isGpt55 = model.startsWith('gpt-5.5');
+      const reqBody: Record<string, unknown> = {
+        model,
+        response_format: { type: 'json_object' as const },
+        max_completion_tokens: 1800,
+        messages: [
+          { role: 'system' as const, content: PROSE_SYSTEM },
+          { role: 'user' as const, content: userMsg },
+        ],
+      };
+      if (!isGpt55) reqBody.temperature = 0.4;
       const res = await request(`${apiBase}/chat/completions`, {
         method: 'POST',
         headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model,
-          response_format: { type: 'json_object' as const },
-          temperature: 0.4,
-          max_tokens: 1800,
-          messages: [
-            { role: 'system' as const, content: PROSE_SYSTEM },
-            { role: 'user' as const, content: userMsg },
-          ],
-        }),
+        body: JSON.stringify(reqBody),
         ...(args.signal ? { signal: args.signal } : {}),
         bodyTimeout: 60_000,
         headersTimeout: 30_000,

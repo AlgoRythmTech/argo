@@ -20,3 +20,5 @@ export * from './multi-agent-build.js';
 export * from './npm-validator.js';
 export * from './test-suite-generator.js';
 export * from './security-scanner.js';
+export * from './parallel-build.js';
+export * from './verifier-agent.js';
