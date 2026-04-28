@@ -1,3 +1,10 @@
+// Load .env.local BEFORE anything else reads process.env.
+import { config as loadDotenv } from 'dotenv';
+import { resolve } from 'node:path';
+loadDotenv({ path: resolve(process.cwd(), '.env.local') });
+loadDotenv({ path: resolve(process.cwd(), '..', '..', '.env.local') });
+loadDotenv(); // also try .env as fallback
+
 import Fastify, { type FastifyInstance } from 'fastify';
 import helmet from '@fastify/helmet';
 import cors from '@fastify/cors';
