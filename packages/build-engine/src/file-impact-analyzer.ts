@@ -71,7 +71,7 @@ export function analyzeFileImpact(
       reasons.push('Field change affects schema/form');
     }
 
-    if (lower.includes('style') && (path.includes('css') || path.includes('.tsx') || path.includes('tailwind'))) {
+    if ((lower.includes('style') || lower.includes('color') || lower.includes('theme') || lower.includes('design')) && (path.includes('css') || path.includes('style') || path.includes('tailwind') || path.includes('theme'))) {
       confidence = Math.max(confidence, 0.7);
       reasons.push('Style change affects CSS/components');
     }
