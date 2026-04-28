@@ -73,6 +73,8 @@ Stream → Parse → Quality Gate (49 checks) → NPM Validate → Security Scan
 
 Every stage must pass. If any stage fails, the deploy is blocked. No exceptions.
 
+When a stage fails, the **dynamic re-planning engine** (inspired by Devin v3) analyzes WHY it failed and tells GPT-5.5 specifically what to do differently — not just "fix the errors." This is why Argo converges where Lovable and Emergent loop forever on the same bug.
+
 ### Agent Builder + Sandbox Allocation
 
 Argo includes a visual agent builder powered by OpenClaw skills:
@@ -148,7 +150,7 @@ pnpm test    # 259 tests across 6 packages, all passing
 | Package | Tests |
 |---------|-------|
 | @argo/agent | 135 |
-| @argo/build-engine | 75 |
+| @argo/build-engine | 87 |
 | @argo/security | 21 |
 | apps/api | 21 |
 | @argo/shared-types | 3 |
@@ -158,7 +160,7 @@ pnpm test    # 259 tests across 6 packages, all passing
 
 | Metric | Count |
 |--------|-------|
-| Source files | 267 |
+| Source files | 286 |
 | API routes | 33 |
 | Web components | 32 |
 | Web pages | 5 |
@@ -167,7 +169,7 @@ pnpm test    # 259 tests across 6 packages, all passing
 | Security scan categories | 15 |
 | Agent tools | 15 |
 | Agent templates | 6 |
-| Tests passing | 259 |
+| Tests passing | 271 |
 | TypeScript errors | 0 |
 
 ## The Doctrine
