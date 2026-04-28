@@ -19,6 +19,7 @@
 
 import { request } from 'undici';
 import pino from 'pino';
+import { selfHostedWebResearch, scrapeUrl } from './web-scraper.js';
 
 const log = pino({ name: 'firecrawl-tool', level: process.env.LOG_LEVEL ?? 'info' });
 const FIRECRAWL_API_BASE = 'https://api.firecrawl.dev/v1';
@@ -42,11 +43,14 @@ export interface WebResearchResult {
 export async function webResearch(query: string, limit = 5): Promise<WebResearchResult> {
   const apiKey = process.env.FIRECRAWL_API_KEY ?? '';
   if (!apiKey) {
+    // Fall back to self-hosted scraper — no external API needed
+    log.info({ query }, 'using self-hosted web research (no Firecrawl key)');
+    const selfHosted = await selfHostedWebResearch(query, limit);
     return {
-      ok: false,
-      query,
-      results: [],
-      error: 'FIRECRAWL_API_KEY not configured — web research unavailable.',
+      ok: selfHosted.ok,
+      query: selfHosted.query,
+      results: selfHosted.results,
+      error: selfHosted.error,
     };
   }
 
@@ -107,7 +111,10 @@ export async function webResearch(query: string, limit = 5): Promise<WebResearch
 export async function webScrape(url: string): Promise<{ ok: boolean; content: string; error?: string }> {
   const apiKey = process.env.FIRECRAWL_API_KEY ?? '';
   if (!apiKey) {
-    return { ok: false, content: '', error: 'FIRECRAWL_API_KEY not configured' };
+    // Fall back to self-hosted scraper
+    log.info({ url }, 'using self-hosted scraper (no Firecrawl key)');
+    const result = await scrapeUrl(url);
+    return { ok: result.ok, content: result.markdown, error: result.error };
   }
 
   try {

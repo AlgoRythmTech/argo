@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { request } from 'undici';
 import { nanoid } from 'nanoid';
+import { selfHostedWebResearch, scrapeUrl } from '@argo/agent';
 import { getMongo } from '../db/mongo.js';
 import { requireSession } from '../plugins/auth-plugin.js';
 import { logger } from '../logger.js';
@@ -129,7 +130,11 @@ async function callGroq(args: {
 
 async function firecrawlSearch(query: string): Promise<Array<{ url: string; title: string; description: string; content: string }>> {
   const firecrawlKey = process.env.FIRECRAWL_API_KEY ?? '';
-  if (!firecrawlKey) return [];
+  if (!firecrawlKey) {
+    // Use self-hosted web research — no API key needed
+    const result = await selfHostedWebResearch(query, 5);
+    return result.results;
+  }
 
   try {
     const res = await request(`${FIRECRAWL_API_BASE}/search`, {
@@ -170,7 +175,10 @@ async function firecrawlSearch(query: string): Promise<Array<{ url: string; titl
 
 async function firecrawlScrape(url: string): Promise<string> {
   const firecrawlKey = process.env.FIRECRAWL_API_KEY ?? '';
-  if (!firecrawlKey) return '';
+  if (!firecrawlKey) {
+    const result = await scrapeUrl(url);
+    return result.ok ? result.markdown : '';
+  }
 
   try {
     const res = await request(`${FIRECRAWL_API_BASE}/scrape`, {
