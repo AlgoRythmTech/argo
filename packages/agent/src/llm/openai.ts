@@ -30,6 +30,10 @@ export type OpenAiConfig = {
   apiKey: string;
   apiBase: string;
   timeoutMs: number;
+  /** Emergent universal key — routes OpenAI calls through Emergent proxy as fallback. */
+  emergentApiKey: string;
+  emergentApiBase: string;
+  emergentEnabled: boolean;
 };
 
 export type OpenAiCompleteArgs<TSchema extends z.ZodTypeAny> = {
@@ -51,8 +55,11 @@ export type OpenAiCompleteArgs<TSchema extends z.ZodTypeAny> = {
  */
 export class OpenAiClient {
   constructor(private readonly cfg: OpenAiConfig) {
-    if (!cfg.apiKey) {
-      log.warn('OPENAI_API_KEY missing — agent will fail at first call');
+    if (!cfg.apiKey && !cfg.emergentEnabled) {
+      log.warn('OPENAI_API_KEY missing and EMERGENT_ENABLED=false — agent will fail at first call');
+    }
+    if (cfg.emergentEnabled && cfg.emergentApiKey) {
+      log.info('Emergent universal key available as OpenAI fallback proxy');
     }
   }
 
@@ -61,7 +68,24 @@ export class OpenAiClient {
       apiKey: process.env.OPENAI_API_KEY ?? '',
       apiBase: process.env.OPENAI_API_BASE ?? 'https://api.openai.com/v1',
       timeoutMs: Number.parseInt(process.env.OPENAI_REQUEST_TIMEOUT_MS ?? '120000', 10),
+      emergentEnabled: (process.env.EMERGENT_ENABLED ?? '').toLowerCase() === 'true',
+      emergentApiKey: process.env.EMERGENT_API_KEY ?? '',
+      emergentApiBase: process.env.EMERGENT_API_BASE ?? 'https://api.emergent.sh/v1',
     });
+  }
+
+  /**
+   * Get the API key and base URL to use. Prefers direct OpenAI key;
+   * falls back to Emergent universal key if direct key is missing.
+   */
+  private getCredentials(): { apiKey: string; apiBase: string } {
+    if (this.cfg.apiKey) {
+      return { apiKey: this.cfg.apiKey, apiBase: this.cfg.apiBase };
+    }
+    if (this.cfg.emergentEnabled && this.cfg.emergentApiKey) {
+      return { apiKey: this.cfg.emergentApiKey, apiBase: this.cfg.emergentApiBase };
+    }
+    return { apiKey: '', apiBase: this.cfg.apiBase };
   }
 
   async completeJson<TSchema extends z.ZodTypeAny>(
@@ -110,10 +134,11 @@ export class OpenAiClient {
     };
     if (temp !== undefined) body.temperature = temp;
 
-    const res = await request(`${this.cfg.apiBase}/chat/completions`, {
+    const creds = this.getCredentials();
+    const res = await request(`${creds.apiBase}/chat/completions`, {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${this.cfg.apiKey}`,
+        authorization: `Bearer ${creds.apiKey}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify(body),
@@ -152,10 +177,11 @@ export class OpenAiClient {
     };
     if (temp2 !== undefined) body.temperature = temp2;
 
-    const res = await request(`${this.cfg.apiBase}/chat/completions`, {
+    const creds = this.getCredentials();
+    const res = await request(`${creds.apiBase}/chat/completions`, {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${this.cfg.apiKey}`,
+        authorization: `Bearer ${creds.apiKey}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify(body),

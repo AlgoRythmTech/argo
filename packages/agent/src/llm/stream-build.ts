@@ -59,13 +59,21 @@ export interface StreamBuildChunk {
  * tag parser to extract structured actions.
  */
 export async function* streamBuild(args: StreamBuildArgs): AsyncGenerator<StreamBuildChunk> {
-  const apiKey = process.env.OPENAI_API_KEY ?? '';
-  const apiBase = process.env.OPENAI_API_BASE ?? 'https://api.openai.com/v1';
+  // Prefer direct OpenAI key; fall back to Emergent universal key.
+  let apiKey = process.env.OPENAI_API_KEY ?? '';
+  let apiBase = process.env.OPENAI_API_BASE ?? 'https://api.openai.com/v1';
   const primary = args.model ?? process.env.OPENAI_MODEL_PRIMARY ?? 'gpt-5.5';
   const fallback = process.env.OPENAI_MODEL_FALLBACK ?? 'gpt-4o';
 
   if (!apiKey) {
-    throw new Error('OPENAI_API_KEY missing — set it in .env.local before invoking the build agent');
+    const emergentEnabled = (process.env.EMERGENT_ENABLED ?? '').toLowerCase() === 'true';
+    const emergentKey = process.env.EMERGENT_API_KEY ?? '';
+    if (emergentEnabled && emergentKey) {
+      apiKey = emergentKey;
+      apiBase = process.env.EMERGENT_API_BASE ?? 'https://api.emergent.sh/v1';
+    } else {
+      throw new Error('OPENAI_API_KEY missing and EMERGENT_ENABLED=false — set one in .env.local before invoking the build agent');
+    }
   }
 
   const candidates = unique([primary, fallback]);
