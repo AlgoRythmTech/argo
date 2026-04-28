@@ -460,15 +460,26 @@ export async function runAutoFixLoop(args: AutoFixArgs): Promise<AutoFixResult> 
       };
     }
 
-    // Compose the re-prompt for the next cycle. The model receives:
-    //   1. The original ask
-    //   2. The current file inventory (paths only — keeps tokens low)
-    //   3. Static-gate failures
-    //   4. Runtime-testing failures (when present)
+    // Dynamic re-planning (inspired by Devin v3): instead of blindly
+    // re-prompting, analyze the failure pattern and adjust strategy.
+    // This is what makes Argo's auto-fix loop actually converge instead
+    // of cycling on the same error like Lovable and Emergent do.
+    const failureAnalysis = analyzeFailurePattern({
+      cycle,
+      qualityReport: report,
+      verifierReport: verifierReport ?? undefined,
+      securityReport: securityReport ?? undefined,
+      npmResult: npmResult ?? undefined,
+      testingReport: testingReport ?? undefined,
+      reviewReport: reviewReport ?? undefined,
+    });
+
+    // Compose the re-prompt for the next cycle with failure analysis.
     userPrompt = composeRetryPrompt({
       originalPrompt: args.userPrompt,
       currentFiles: Array.from(files.keys()),
       report,
+      failureAnalysis,
       ...(testingReport && !testingReport.passed
         ? { runtimeReport: renderTestingReportAsAutoFixPrompt(testingReport) }
         : {}),
@@ -509,6 +520,8 @@ function composeRetryPrompt(args: {
   runtimeReport?: string;
   /** Optional security scan report when vulnerabilities were found. */
   securityReport?: string;
+  /** Failure pattern analysis — what went wrong and what to try differently. */
+  failureAnalysis?: string;
   /** Optional verifier report when the verifier agent caught issues. */
   verifierReport?: string;
   /** Optional reviewer report when multi-agent mode caught issues. */
@@ -525,6 +538,12 @@ function composeRetryPrompt(args: {
     ...args.currentFiles.map((p) => `- ${p}`),
     '',
   ];
+  if (args.failureAnalysis) {
+    lines.push('## Failure analysis (read this FIRST)');
+    lines.push('');
+    lines.push(args.failureAnalysis);
+    lines.push('');
+  }
   if (!args.report.passed) {
     lines.push('## Static quality gate failures');
     lines.push('');
@@ -631,4 +650,97 @@ function filesToBundle(
 
 function emptyReport(): QualityReport {
   return { passed: false, errorCount: 0, warnCount: 0, issues: [], autoFixPrompt: '' };
+}
+
+/**
+ * Dynamic re-planning — analyze WHY the cycle failed and produce
+ * targeted guidance for the next attempt. This is what Devin v3 does
+ * that makes it converge instead of looping on the same error.
+ *
+ * The analysis looks at the failure type and suggests a different
+ * approach rather than just "fix the errors."
+ */
+function analyzeFailurePattern(args: {
+  cycle: number;
+  qualityReport: QualityReport;
+  verifierReport?: VerifierReport;
+  securityReport?: SecurityScanReport;
+  npmResult?: DependencyValidationResult;
+  testingReport?: TestingReport;
+  reviewReport?: ReviewReport;
+}): string {
+  const lines: string[] = [];
+  const { cycle, qualityReport, verifierReport, securityReport, npmResult, testingReport, reviewReport } = args;
+
+  lines.push(`This is retry cycle ${cycle}. The previous attempt failed. Here is WHY and what to do differently:`);
+  lines.push('');
+
+  // Categorize the primary failure type
+  if (npmResult && !npmResult.allValid) {
+    lines.push('PRIMARY FAILURE: Hallucinated npm packages.');
+    lines.push('You used package names that do not exist on npm. This is a known LLM issue.');
+    lines.push('DO: Use ONLY well-known packages. When unsure, use node:* builtins.');
+    lines.push('DO NOT: Invent package names or use packages from your training data that may not exist.');
+    lines.push('');
+  }
+
+  if (securityReport && !securityReport.passed) {
+    const criticalCount = securityReport.findings.filter((f) => f.severity === 'critical').length;
+    lines.push(`PRIMARY FAILURE: ${criticalCount} security vulnerabilities detected.`);
+    lines.push('The most common causes: hardcoded secrets, eval(), SQL injection, XSS via innerHTML.');
+    lines.push('DO: Use environment variables for ALL secrets. Use parameterized queries. Use textContent not innerHTML.');
+    lines.push('DO NOT: Put API keys in code. Use eval(). Concatenate user input into SQL/HTML.');
+    lines.push('');
+  }
+
+  if (verifierReport && !verifierReport.passed) {
+    const incompleteCount = verifierReport.findings.filter((f) =>
+      f.category === 'incomplete_code' || f.category === 'ai_slop',
+    ).length;
+    const importIssues = verifierReport.findings.filter((f) => f.category === 'import_issue').length;
+
+    if (incompleteCount > 0) {
+      lines.push(`PRIMARY FAILURE: ${incompleteCount} incomplete/stub code detected.`);
+      lines.push('You wrote "// TODO", "// rest of code", or placeholder content.');
+      lines.push('DO: Write COMPLETE implementations. Every function must have a real body.');
+      lines.push('DO NOT: Use placeholder comments, TODO markers, or "rest of code" stubs.');
+      lines.push('');
+    }
+
+    if (importIssues > 0) {
+      lines.push(`PRIMARY FAILURE: ${importIssues} broken import(s).`);
+      lines.push('You imported files or modules that do not exist in the bundle.');
+      lines.push('DO: Only import files you are creating in this same response.');
+      lines.push('DO NOT: Import files you haven\'t written yet or assume they exist.');
+      lines.push('');
+    }
+  }
+
+  if (qualityReport.issues.length > 10) {
+    lines.push('STRATEGY CHANGE: Too many issues to fix individually.');
+    lines.push('Re-emit the ENTIRE affected file with <dyad-write> instead of patching.');
+    lines.push('Focus on getting the structure right first, then worry about edge cases.');
+    lines.push('');
+  }
+
+  if (testingReport && !testingReport.passed) {
+    const bootFailed = testingReport.failures.some((f) => f.kind === 'boot_failure');
+    if (bootFailed) {
+      lines.push('PRIMARY FAILURE: The server failed to boot.');
+      lines.push('Common causes: missing dependency, syntax error in server.js, wrong port.');
+      lines.push('DO: Check that server.js imports only files that exist. Listen on process.env.PORT || 3000.');
+      lines.push('DO: Ensure /health route is registered BEFORE other routes.');
+      lines.push('');
+    }
+  }
+
+  if (cycle >= 2) {
+    lines.push('IMPORTANT: This is cycle ' + cycle + '. Previous cycles failed to fix the issues.');
+    lines.push('Take a DIFFERENT approach this time. Do not repeat the same patterns.');
+    lines.push('If you are stuck on a specific file, rewrite it from scratch with <dyad-write>.');
+    lines.push('If you are stuck on imports, simplify: inline the dependency instead of importing.');
+    lines.push('');
+  }
+
+  return lines.join('\n');
 }
